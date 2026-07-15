@@ -10,6 +10,8 @@
 
 **A browser-native AI recon console.** An in-browser terminal and a Claude agent that drives MCP security tools, sharing one shell session — behind one thin Node backend.
 
+![IntelliRecon console](assets/console.png)
+
 Inspired by hexstrike-ai and xalgorix.
 
 IntelliRecon is one project, three parts, all under this repo:
