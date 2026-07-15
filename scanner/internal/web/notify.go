@@ -62,7 +62,7 @@ func (s *Server) sendDiscordWithFile(color int, title, description, filePath str
 	// Add payload JSON
 	embedPayload := map[string]any{
 		"username":   "IntelliRecon",
-		"avatar_url": "https://raw.githubusercontent.com/dokotela021/intellirecon-console/master/assets/logo.png",
+		"avatar_url": "https://raw.githubusercontent.com/dokotela021/intellirecon-console/master/scanner/assets/logo.png",
 		"embeds": []map[string]any{
 			{
 				"title":       title,
@@ -123,7 +123,7 @@ func (s *Server) sendDiscordWithFile(color int, title, description, filePath str
 func (s *Server) sendSimpleEmbed(color int, title, description string) {
 	payload := map[string]any{
 		"username":   "IntelliRecon",
-		"avatar_url": "https://raw.githubusercontent.com/dokotela021/intellirecon-console/master/assets/logo.png",
+		"avatar_url": "https://raw.githubusercontent.com/dokotela021/intellirecon-console/master/scanner/assets/logo.png",
 		"embeds": []map[string]any{
 			{
 				"title":       title,
