@@ -6,7 +6,6 @@
 ### AI-Powered MCP Cybersecurity Automation Platform
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](.)
 [![Tools](https://img.shields.io/badge/Security%20Tools-150%2B-brightgreen.svg)](.)
 [![Agents](https://img.shields.io/badge/AI%20Agents-12%2B-purple.svg)](.)
@@ -688,7 +687,7 @@ python3 intellirecon_server.py --port 8888 --debug
 
 ## License
 
-MIT License.
+No license file is currently included in this directory.
 
 ---
 
