@@ -47,9 +47,13 @@ info "Platform: ${OS}/${ARCH} → asset '${ASSET}'"
 VERSION="${INTELLIRECON_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
   info "Resolving latest release…"
+  # Grep finding no match exits non-zero; under `set -e -o pipefail` that
+  # would kill the script here instead of reaching the die() below with a
+  # useful message. The `|| true` lets a missing/empty release response
+  # fall through to that check instead of failing silently.
   VERSION="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
-  [[ -n "$VERSION" ]] || die "Could not resolve the latest release tag from GitHub."
+    | { grep -o '"tag_name":[[:space:]]*"[^"]*"' || true; } | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+  [[ -n "$VERSION" ]] || die "Could not resolve the latest release tag from GitHub. No release may exist yet — check https://github.com/${REPO}/releases, or build from source instead (see the README)."
 fi
 ok "Installing ${BINARY} ${VERSION}"
 
