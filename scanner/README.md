@@ -2,7 +2,6 @@
 
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
-[![License](https://img.shields.io/badge/License-MIT-10b981?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux-111111?style=for-the-badge&logo=linux&logoColor=white)](#installation)
 [![Hosted](https://img.shields.io/badge/Hosted-www.intellirecon.com-6d28d9?style=for-the-badge&logo=icloud&logoColor=white)](https://www.intellirecon.com/)
 [![GitHub stars](https://img.shields.io/github/stars/intellirecon/intellirecon?style=for-the-badge&logo=github&color=yellow)](https://github.com/intellirecon/intellirecon/stargazers)
@@ -740,7 +739,7 @@ The server keeps historical scan records on disk so the UI can recover after ref
 
 ## License
 
-IntelliRecon is released under the MIT License.
+No license file is currently included in this directory.
 
 ## Links
 
