@@ -2,7 +2,7 @@
 #
 # IntelliRecon installer — one-line install of the latest release binary.
 #
-#   curl -sSL https://raw.githubusercontent.com/dokotela021/intellirecon-console/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/dokotela021/intellirecon-console/master/install.sh | bash
 #
 # What it does:
 #   1. Detects your OS and CPU architecture.
