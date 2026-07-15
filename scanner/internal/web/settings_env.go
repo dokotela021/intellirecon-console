@@ -117,7 +117,7 @@ func allEnvSettingDefinitions() []envSettingDefinition {
 		autoInstallDefault = "true"
 	}
 	return []envSettingDefinition{
-		{Key: "INTELLIRECON_LLM", Label: "LLM model", Category: "LLM", Description: "Default model used by scans and post-scan chat.", Placeholder: "minimax/MiniMax-M3", InputType: "text"},
+		{Key: "INTELLIRECON_LLM", Label: "LLM model", Category: "LLM", Description: "Default model used by scans and post-scan chat.", Placeholder: "anthropic/claude-opus-4-8", InputType: "text"},
 		{Key: "INTELLIRECON_API_KEY", Label: "LLM API key", Category: "LLM", Description: "Provider API key for the configured model.", Placeholder: "sk-...", InputType: "secret", Sensitive: true},
 		{Key: "INTELLIRECON_API_BASE", Label: "API base URL", Category: "LLM", Description: "Optional custom provider endpoint. Leave blank to use provider defaults.", Placeholder: "https://api.openai.com/v1", InputType: "url"},
 		{Key: "INTELLIRECON_LLM_PROFILE", Label: "Active LLM profile", Category: "LLM", Description: "Active credential pointer (\"<provider>:<profileId>\"). Set by the LLM Settings tab; takes precedence over INTELLIRECON_API_KEY/INTELLIRECON_LLM when present.", Placeholder: "openai:default", InputType: "text"},

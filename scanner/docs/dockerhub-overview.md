@@ -23,7 +23,7 @@ This image is **batteries-included**: it's built on Kali Linux with hundreds of 
 
 ```bash
 docker run --rm -p 9137:9137 \
-  -e INTELLIRECON_LLM=minimax/MiniMax-M3 \
+  -e INTELLIRECON_LLM=anthropic/claude-opus-4-8 \
   -e INTELLIRECON_API_KEY=your_provider_api_key \
   -v intellirecon-data:/data \
   dokotela021/intellirecon-console:latest
@@ -43,7 +43,7 @@ An extensive toolset ships preinstalled — `nmap`, `nuclei`, `httpx`, `subfinde
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `INTELLIRECON_LLM` | ✅ | Model, usually with a provider prefix, e.g. `minimax/MiniMax-M3`, `openai/gpt-5.4`. |
+| `INTELLIRECON_LLM` | ✅ | Model, usually with a provider prefix, e.g. `anthropic/claude-opus-4-8`, `openai/gpt-5.4`. |
 | `INTELLIRECON_API_KEY` | ✅ | API key for the configured LLM provider. |
 | `INTELLIRECON_API_BASE` | — | Custom OpenAI-compatible base URL. |
 | `INTELLIRECON_USERNAME` / `INTELLIRECON_PASSWORD` | — | Dashboard auth. **Required** before exposing the dashboard beyond localhost. |

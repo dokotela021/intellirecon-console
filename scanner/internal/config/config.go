@@ -410,7 +410,7 @@ func CheckEnvFile() error {
 	envPath := filepath.Join(home, ".intellirecon.env")
 
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
-		return fmt.Errorf("configuration file not found: %s\n\nPlease create it with:\n  INTELLIRECON_LLM=minimax/MiniMax-M3\n  INTELLIRECON_API_KEY=your_api_key\n\nOr run: intellirecon --setup", envPath)
+		return fmt.Errorf("configuration file not found: %s\n\nPlease create it with:\n  INTELLIRECON_LLM=anthropic/claude-opus-4-8\n  INTELLIRECON_API_KEY=your_api_key\n\nOr run: intellirecon --setup", envPath)
 	}
 
 	llm := ""
@@ -445,7 +445,7 @@ func CheckEnvFile() error {
 	}
 
 	if llm == "" || apiKey == "" {
-		return fmt.Errorf("configuration file is invalid or missing required variables\n\nPlease add to %s:\n  INTELLIRECON_LLM=minimax/MiniMax-M3\n  INTELLIRECON_API_KEY=your_api_key", envPath)
+		return fmt.Errorf("configuration file is invalid or missing required variables\n\nPlease add to %s:\n  INTELLIRECON_LLM=anthropic/claude-opus-4-8\n  INTELLIRECON_API_KEY=your_api_key", envPath)
 	}
 
 	return nil

@@ -42,7 +42,7 @@ sudo install -m 755 build/intellirecon /usr/local/bin/intellirecon
 Then point it at your LLM provider in `~/.intellirecon.env`:
 
 ```bash
-INTELLIRECON_LLM=minimax/MiniMax-M3
+INTELLIRECON_LLM=anthropic/claude-opus-4-8
 INTELLIRECON_API_KEY=your_provider_api_key
 ```
 
@@ -173,7 +173,7 @@ git clone https://github.com/dokotela021/intellirecon-console.git
 cd intellirecon-console/scanner
 docker build -t intellirecon .
 docker run --rm -p 9137:9137 \
-  -e INTELLIRECON_LLM=minimax/MiniMax-M3 \
+  -e INTELLIRECON_LLM=anthropic/claude-opus-4-8 \
   -e INTELLIRECON_API_KEY=your_provider_api_key \
   -v intellirecon-data:/data \
   intellirecon
@@ -233,7 +233,7 @@ nano ~/.intellirecon.env
 ### Minimal Config
 
 ```bash
-INTELLIRECON_LLM=minimax/MiniMax-M3
+INTELLIRECON_LLM=anthropic/claude-opus-4-8
 INTELLIRECON_API_KEY=your_provider_api_key
 ```
 

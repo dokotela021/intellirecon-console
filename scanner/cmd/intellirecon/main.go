@@ -231,7 +231,7 @@ func main() {
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Configuration error: %s\n\n", err)
-		fmt.Fprintf(os.Stderr, "Set your model:     export INTELLIRECON_LLM='minimax/MiniMax-M3'\n")
+		fmt.Fprintf(os.Stderr, "Set your model:     export INTELLIRECON_LLM='anthropic/claude-opus-4-8'\n")
 		fmt.Fprintf(os.Stderr, "Set your API key:    export INTELLIRECON_API_KEY='sk-...'\n")
 		os.Exit(1)
 	}
@@ -402,7 +402,7 @@ func printUsage() {
 	fmt.Println("  intellirecon --uninstall  Remove intellirecon from system")
 	fmt.Println()
 	fmt.Println("Environment:")
-	fmt.Println("  INTELLIRECON_LLM              Model name (e.g. minimax/MiniMax-M3)")
+	fmt.Println("  INTELLIRECON_LLM              Model name (e.g. anthropic/claude-opus-4-8)")
 	fmt.Println("  INTELLIRECON_API_KEY           API key")
 	fmt.Println("  INTELLIRECON_API_BASE          API base URL")
 	fmt.Println("  INTELLIRECON_MAX_ITERATIONS    Max iterations (0 = unlimited)")
