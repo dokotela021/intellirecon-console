@@ -1,0 +1,1045 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"intellirecon-scanner/internal/auth"
+)
+
+type envSettingDefinition struct {
+	Key             string   `json:"key"`
+	Label           string   `json:"label"`
+	Category        string   `json:"category"`
+	Description     string   `json:"description"`
+	DefaultValue    string   `json:"defaultValue,omitempty"`
+	Placeholder     string   `json:"placeholder,omitempty"`
+	InputType       string   `json:"inputType"`
+	Options         []string `json:"options,omitempty"`
+	Sensitive       bool     `json:"sensitive"`
+	RequiresRestart bool     `json:"requiresRestart"`
+}
+
+type envSettingValue struct {
+	envSettingDefinition
+	Value    string `json:"value"`
+	HasValue bool   `json:"hasValue"`
+}
+
+type environmentSettingsResponse struct {
+	EnvFile         string            `json:"envFile"`
+	Variables       []envSettingValue `json:"variables"`
+	RestartRequired bool              `json:"restartRequired,omitempty"`
+}
+
+type llmSettingsResponse struct {
+	Model                     string `json:"model"`
+	APIBase                   string `json:"apiBase"`
+	APIKey                    string `json:"apiKey"`
+	HasAPIKey                 bool   `json:"hasApiKey"`
+	ReasoningEffort           string `json:"reasoningEffort"`
+	LLMMaxRetries             int    `json:"llmMaxRetries"`
+	MemoryCompressorTimeout   int    `json:"memoryCompressorTimeout"`
+	MaxIterations             int    `json:"maxIterations"`
+	GeminiAPIKey              string `json:"geminiApiKey"`
+	HasGeminiAPIKey           bool   `json:"hasGeminiApiKey"`
+	EnvFile                   string `json:"envFile"`
+	EnvironmentRestartWarning bool   `json:"environmentRestartWarning"`
+	// v4.4.22: catalog-aware fields driving the new LLM Settings
+	// tab. Provider mirrors the active provider id derived from
+	// LLMProfile (or the legacy INTELLIRECON_LLM "<provider>/<model>"
+	// prefix when no profile is active). AuthMethod tracks which
+	// branch the resolver currently dispatches through. Profiles
+	// is the masked list of saved profiles for the active
+	// provider only — see handleLLMSettings GET for filtering.
+	Provider         string              `json:"provider"`
+	AuthMethod       string              `json:"authMethod"`
+	ActiveProfileKey string              `json:"activeProfileKey"`
+	Profiles         []llmProfileSummary `json:"profiles"`
+}
+
+// llmProfileSummary is the masked, dashboard-friendly view of one
+// auth.Profile filtered to the active provider in the LLM tab.
+// Wire shape mirrors maskedProfile in handlers_profiles.go but is
+// declared independently so we never import handlers_profiles types.
+type llmProfileSummary struct {
+	Key             string `json:"key"`
+	Provider        string `json:"provider"`
+	ProfileID       string `json:"profileId"`
+	Type            string `json:"type"`
+	HasAccessToken  bool   `json:"hasAccessToken"`
+	HasAPIKey       bool   `json:"hasApiKey"`
+	APIBaseOverride string `json:"apiBaseOverride,omitempty"`
+	ExpiresAt       string `json:"expiresAt,omitempty"`
+	RequiresReauth  bool   `json:"requiresReauth,omitempty"`
+}
+
+// llmSettingsRequest is the shared decoded shape of POST
+// /api/settings/llm. Both the legacy field set
+// (model/apiBase/apiKey/...) and the v4.4.22 field set
+// (provider/authMethod/profileId/activeProfileKey/...) decode into
+// this struct; handleLLMSettings sniffs which branch to take by
+// presence of provider/authMethod/activeProfileKey.
+type llmSettingsRequest struct {
+	// Legacy fields (kept for backwards compat).
+	Model                   string `json:"model"`
+	APIBase                 string `json:"apiBase"`
+	APIKey                  string `json:"apiKey"`
+	ReasoningEffort         string `json:"reasoningEffort"`
+	LLMMaxRetries           int    `json:"llmMaxRetries"`
+	MemoryCompressorTimeout int    `json:"memoryCompressorTimeout"`
+	MaxIterations           int    `json:"maxIterations"`
+	GeminiAPIKey            string `json:"geminiApiKey"`
+
+	// v4.4.22 fields.
+	Provider         string `json:"provider"`
+	AuthMethod       string `json:"authMethod"`
+	ProfileID        string `json:"profileId"`
+	APIBaseOverride  string `json:"apiBaseOverride"`
+	ActiveProfileKey string `json:"activeProfileKey"`
+}
+
+var envSettingKeyRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+func allEnvSettingDefinitions() []envSettingDefinition {
+	autoInstallDefault := "false"
+	if os.Getuid() == 0 {
+		autoInstallDefault = "true"
+	}
+	return []envSettingDefinition{
+		{Key: "INTELLIRECON_LLM", Label: "LLM model", Category: "LLM", Description: "Default model used by scans and post-scan chat.", Placeholder: "minimax/MiniMax-M3", InputType: "text"},
+		{Key: "INTELLIRECON_API_KEY", Label: "LLM API key", Category: "LLM", Description: "Provider API key for the configured model.", Placeholder: "sk-...", InputType: "secret", Sensitive: true},
+		{Key: "INTELLIRECON_API_BASE", Label: "API base URL", Category: "LLM", Description: "Optional custom provider endpoint. Leave blank to use provider defaults.", Placeholder: "https://api.openai.com/v1", InputType: "url"},
+		{Key: "INTELLIRECON_LLM_PROFILE", Label: "Active LLM profile", Category: "LLM", Description: "Active credential pointer (\"<provider>:<profileId>\"). Set by the LLM Settings tab; takes precedence over INTELLIRECON_API_KEY/INTELLIRECON_LLM when present.", Placeholder: "openai:default", InputType: "text"},
+		{Key: "INTELLIRECON_REASONING_EFFORT", Label: "Reasoning effort", Category: "LLM", Description: "Reasoning depth for providers that support it.", DefaultValue: "high", InputType: "select", Options: []string{"low", "medium", "high", "xhigh"}},
+		{Key: "INTELLIRECON_LLM_MAX_RETRIES", Label: "LLM max retries", Category: "LLM", Description: "Retry count for transient LLM provider failures.", DefaultValue: "5", InputType: "number"},
+		{Key: "INTELLIRECON_MEMORY_COMPRESSOR_TIMEOUT", Label: "Memory compressor timeout", Category: "LLM", Description: "Timeout in seconds for context compression.", DefaultValue: "30", InputType: "number"},
+		{Key: "INTELLIRECON_MAX_ITERATIONS", Label: "Max iterations", Category: "Runtime", Description: "Maximum agent iterations per scan. 0 means unlimited.", DefaultValue: "0", InputType: "number"},
+		{Key: "INTELLIRECON_MAX_TOOL_CALLS", Label: "Max tool calls (budget)", Category: "Runtime", Description: "Per-scan tool-call cap; the scan stops cleanly when reached (findings preserved). 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_MAX_DURATION", Label: "Max duration seconds (budget)", Category: "Runtime", Description: "Per-scan wall-clock cap in seconds; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_MAX_TOKENS", Label: "Max LLM tokens (budget)", Category: "Runtime", Description: "Per-scan total-token cap; the scan stops cleanly when reached. 0 = unlimited.", DefaultValue: "0", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_TARGET_AUTH", Label: "Target auth (authenticated scanning)", Category: "Runtime", Description: "Authenticated-session credentials for the target so the agent tests post-auth surface (IDOR/BOLA, privilege escalation, business logic). One 'Header-Name: value' per line or separated by ';'. e.g. 'Cookie: session=abc; Authorization: Bearer xyz'. Auto-applied to http_request.", Placeholder: "Cookie: session=...; Authorization: Bearer ...", InputType: "text", Sensitive: true, RequiresRestart: true},
+		{Key: "INTELLIRECON_OOB_PUBLIC_URL", Label: "OOB callback URL", Category: "Runtime", Description: "Public address targets can reach for out-of-band verification of blind vulns (blind SSRF/RCE/XSS/XXE), e.g. https://oob.example.com. Enables the oob_callback tool. Leave blank to disable OOB.", Placeholder: "https://oob.example.com", InputType: "url", RequiresRestart: true},
+		{Key: "INTELLIRECON_OOB_PORT", Label: "OOB listener port", Category: "Runtime", Description: "Local port the OOB callback listener binds (0.0.0.0). Expose/reverse-proxy it to the OOB callback URL above.", Placeholder: "8888", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_SOURCE_REPO", Label: "Whitebox source (repo/path)", Category: "Runtime", Description: "Enable whitebox / source-assisted assessment. A Git URL (shallow-cloned) or a local directory path to the target's source. Activates the code_search tool and source→sink→exploit methodology — where RCE, injection, and secret-exposure bugs are found.", Placeholder: "https://github.com/org/app.git", InputType: "text", RequiresRestart: true},
+		{Key: "GEMINI_API_KEY", Label: "Gemini web-search key", Category: "LLM", Description: "Optional Gemini key for web search enrichment.", Placeholder: "AIza...", InputType: "secret", Sensitive: true},
+
+		{Key: "INTELLIRECON_DISCORD_WEBHOOK", Label: "Discord webhook", Category: "Notifications", Description: "Global Discord webhook used when a scan does not provide its own.", Placeholder: "https://discord.com/api/webhooks/...", InputType: "secret", Sensitive: true},
+		{Key: "INTELLIRECON_DISCORD_MIN_SEVERITY", Label: "Discord minimum severity", Category: "Notifications", Description: "Minimum severity sent to Discord.", InputType: "select", Options: []string{"", "info", "low", "medium", "high", "critical"}},
+
+		{Key: "INTELLIRECON_TELEGRAM_BOT_TOKEN", Label: "Telegram bot token", Category: "Notifications", Description: "Bot token from @BotFather. Required to enable Telegram notifications.", Placeholder: "123456789:ABC-DEF...", InputType: "secret", Sensitive: true},
+		{Key: "INTELLIRECON_TELEGRAM_CHAT_ID", Label: "Telegram chat ID", Category: "Notifications", Description: "Target chat/channel ID. Numeric ID (e.g. -1001234567890) or @channelusername.", Placeholder: "-1001234567890", InputType: "text"},
+		{Key: "INTELLIRECON_TELEGRAM_MIN_SEVERITY", Label: "Telegram minimum severity", Category: "Notifications", Description: "Minimum severity sent to Telegram.", InputType: "select", Options: []string{"", "info", "low", "medium", "high", "critical"}},
+
+		{Key: "AGENTMAIL_POD", Label: "AgentMail pod", Category: "AgentMail", Description: "AgentMail pod identifier.", Placeholder: "am_us_pod_47", InputType: "text"},
+		{Key: "AGENTMAIL_API_KEY", Label: "AgentMail API key", Category: "AgentMail", Description: "AgentMail API key for inbound email triage.", Placeholder: "ak_...", InputType: "secret", Sensitive: true},
+
+		{Key: "INTELLIRECON_RATE_LIMIT_REQUESTS", Label: "Rate-limit requests", Category: "Rate limits", Description: "Requests allowed per dashboard rate-limit window.", DefaultValue: "60", InputType: "number"},
+		{Key: "INTELLIRECON_RATE_LIMIT_WINDOW", Label: "Rate-limit window", Category: "Rate limits", Description: "Rate-limit window in seconds.", DefaultValue: "60", InputType: "number"},
+		{Key: "INTELLIRECON_RATE_RPS", Label: "Outbound RPS", Category: "Rate limits", Description: "Sustained per-domain outbound request rate.", DefaultValue: "10", InputType: "number"},
+		{Key: "INTELLIRECON_RATE_BURST", Label: "Outbound burst", Category: "Rate limits", Description: "Per-domain outbound burst size.", DefaultValue: "20", InputType: "number"},
+
+		{Key: "INTELLIRECON_USE_PROXY", Label: "Use proxy", Category: "Proxy", Description: "Enable proxy routing for outbound traffic.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "INTELLIRECON_PROXY_URL", Label: "Proxy URL", Category: "Proxy", Description: "Single proxy URL. Overrides proxy file when set.", Placeholder: "socks5://user:pass@127.0.0.1:1080", InputType: "secret", Sensitive: true},
+		{Key: "INTELLIRECON_PROXY_FILE", Label: "Proxy file", Category: "Proxy", Description: "Path to a file with one proxy per line.", Placeholder: "/path/to/proxies.txt", InputType: "path"},
+		{Key: "INTELLIRECON_PROXY_ROTATION", Label: "Proxy rotation", Category: "Proxy", Description: "Proxy rotation strategy.", DefaultValue: "roundrobin", InputType: "select", Options: []string{"roundrobin", "random"}},
+		{Key: "INTELLIRECON_TLS_SKIP_VERIFY", Label: "Skip TLS verification", Category: "Proxy", Description: "Allow insecure TLS verification for proxied/testing traffic.", DefaultValue: "false", InputType: "boolean"},
+
+		{Key: "INTELLIRECON_WORKSPACE", Label: "Workspace", Category: "Runtime", Description: "Workspace root for scan execution.", InputType: "path", RequiresRestart: true},
+		{Key: "INTELLIRECON_DISABLE_BROWSER", Label: "Disable browser", Category: "Runtime", Description: "Disable browser automation tools.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "INTELLIRECON_BROWSER_PATH", Label: "Browser path", Category: "Runtime", Description: "Custom Chrome/Chromium executable path.", InputType: "path"},
+		{Key: "INTELLIRECON_ALLOW_AUTO_INSTALL", Label: "Allow auto-install", Category: "Runtime", Description: "Permit the agent to auto-install missing packages.", DefaultValue: autoInstallDefault, InputType: "boolean"},
+		{Key: "INTELLIRECON_AUTO_INSTALL_SUDO", Label: "Allow sudo auto-install", Category: "Runtime", Description: "Permit sudo-prefixed auto-installs.", DefaultValue: "false", InputType: "boolean"},
+		{Key: "INTELLIRECON_ALLOW_ABSOLUTE_FILEEDIT", Label: "Allow absolute file edits", Category: "Runtime", Description: "Allow file-edit tooling to write absolute paths.", DefaultValue: "false", InputType: "boolean"},
+
+		{Key: "INTELLIRECON_USERNAME", Label: "Dashboard username", Category: "Security", Description: "Dashboard login username.", InputType: "text", RequiresRestart: true},
+		{Key: "INTELLIRECON_PASSWORD", Label: "Dashboard password", Category: "Security", Description: "Plaintext dashboard password. Prefer INTELLIRECON_PASSWORD_HASH.", InputType: "secret", Sensitive: true, RequiresRestart: true},
+		{Key: "INTELLIRECON_PASSWORD_HASH", Label: "Dashboard password hash", Category: "Security", Description: "Bcrypt dashboard password hash.", InputType: "secret", Sensitive: true, RequiresRestart: true},
+		{Key: "INTELLIRECON_BIND", Label: "Bind address", Category: "Security", Description: "Web server listen address.", DefaultValue: "127.0.0.1", Placeholder: "127.0.0.1", InputType: "text", RequiresRestart: true},
+
+		{Key: "CAIDO_PORT", Label: "Caido port", Category: "Integrations", Description: "Caido proxy port. 0 means auto-detect.", DefaultValue: "0", InputType: "number"},
+		{Key: "CAIDO_API_TOKEN", Label: "Caido API token", Category: "Integrations", Description: "Caido API token for proxy integration.", InputType: "secret", Sensitive: true},
+		{Key: "INTELLIRECON_TELEMETRY", Label: "Telemetry", Category: "Integrations", Description: "Enable OpenTelemetry export.", DefaultValue: "true", InputType: "boolean"},
+		{Key: "INTELLIRECON_OTEL_ENDPOINT", Label: "OTel endpoint", Category: "Integrations", Description: "OpenTelemetry collector endpoint.", InputType: "url"},
+
+		{Key: "INTELLIRECON_CPU_CAUTION_PCT", Label: "CPU caution percent", Category: "Resources", Description: "CPU load caution threshold.", DefaultValue: "70", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_CPU_CRITICAL_PCT", Label: "CPU critical percent", Category: "Resources", Description: "CPU load critical threshold.", DefaultValue: "90", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_RAM_CAUTION_MB", Label: "RAM caution MB", Category: "Resources", Description: "Available RAM caution threshold.", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_RAM_CRITICAL_MB", Label: "RAM critical MB", Category: "Resources", Description: "Available RAM critical threshold.", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_DISK_CAUTION_MB", Label: "Disk caution MB", Category: "Resources", Description: "Free disk caution threshold.", DefaultValue: "2048", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_DISK_CRITICAL_MB", Label: "Disk critical MB", Category: "Resources", Description: "Free disk critical threshold.", DefaultValue: "1024", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_MAX_INSTANCES", Label: "Max instances", Category: "Resources", Description: "Manual maximum concurrent scan instances.", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_HEAVY_TOOL_CPU_LOAD", Label: "Heavy tool CPU load", Category: "Resources", Description: "Expected CPU load per heavy terminal tool. Empty means auto-scale from CPU cores.", Placeholder: "auto", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_SCAN_MEMORY_BUDGET_MB", Label: "Scan memory budget MB", Category: "Resources", Description: "Memory budget per active scan. Empty means auto-scale from RAM and CPU cores.", Placeholder: "auto", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_SCAN_OVERHEAD_MB", Label: "Scan overhead MB", Category: "Resources", Description: "Reserved memory overhead per scan. Empty means auto-scale from RAM.", Placeholder: "auto", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_HEAVY_TOOL_MEM_LIMIT_MB", Label: "Heavy tool memory limit MB", Category: "Resources", Description: "Optional hard address-space limit for heavy terminal tools. Empty or 0 leaves hard limiting disabled; dynamic admission still uses live RAM headroom.", Placeholder: "disabled", InputType: "number", RequiresRestart: true},
+		{Key: "INTELLIRECON_GO_MEM_LIMIT_MB", Label: "Go memory limit MB", Category: "Resources", Description: "Soft memory limit for the IntelliRecon parent process. Empty means auto-scale from RAM.", Placeholder: "auto", InputType: "number", RequiresRestart: true},
+	}
+}
+
+func envDefinitionByKey() map[string]envSettingDefinition {
+	defs := allEnvSettingDefinitions()
+	out := make(map[string]envSettingDefinition, len(defs))
+	for _, def := range defs {
+		out[def.Key] = def
+	}
+	return out
+}
+
+func (s *Server) handleLLMSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(s.llmSettings(r.Context()))
+	case http.MethodPost:
+		var req llmSettingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+
+		// Sniff which shape the client sent. Any of provider /
+		// authMethod / activeProfileKey present → catalog-aware
+		// path. Otherwise → legacy free-text path. The legacy
+		// path is kept verbatim (Requirement: backwards-compat
+		// for older WebUI builds and for anyone scripting against
+		// the API).
+		isCatalogShape := strings.TrimSpace(req.Provider) != "" ||
+			strings.TrimSpace(req.AuthMethod) != "" ||
+			strings.TrimSpace(req.ActiveProfileKey) != ""
+
+		if isCatalogShape {
+			if err := s.applyCatalogLLMSettings(r.Context(), req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(s.llmSettings(r.Context()))
+			return
+		}
+
+		// Legacy shape — unchanged from v4.4.21.
+		req.LLMMaxRetries = clampInt(req.LLMMaxRetries, 0, 20)
+		req.MemoryCompressorTimeout = clampInt(req.MemoryCompressorTimeout, 5, 600)
+		req.MaxIterations = clampInt(req.MaxIterations, 0, 1000)
+		reasoning := strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
+		if reasoning == "" {
+			reasoning = "high"
+		}
+		if !oneOf(reasoning, []string{"low", "medium", "high", "xhigh"}) {
+			http.Error(w, "invalid reasoning effort", http.StatusBadRequest)
+			return
+		}
+
+		updates := map[string]string{
+			"INTELLIRECON_LLM":                       strings.TrimSpace(req.Model),
+			"INTELLIRECON_API_BASE":                  strings.TrimSpace(req.APIBase),
+			"INTELLIRECON_REASONING_EFFORT":          reasoning,
+			"INTELLIRECON_LLM_MAX_RETRIES":           strconv.Itoa(req.LLMMaxRetries),
+			"INTELLIRECON_MEMORY_COMPRESSOR_TIMEOUT": strconv.Itoa(req.MemoryCompressorTimeout),
+			"INTELLIRECON_MAX_ITERATIONS":            strconv.Itoa(req.MaxIterations),
+		}
+		if !isMaskedSettingValue(req.APIKey) {
+			updates["INTELLIRECON_API_KEY"] = strings.TrimSpace(req.APIKey)
+		}
+		if !isMaskedSettingValue(req.GeminiAPIKey) {
+			updates["GEMINI_API_KEY"] = strings.TrimSpace(req.GeminiAPIKey)
+		}
+		if _, err := s.applyEnvironmentUpdates(updates); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(s.llmSettings(r.Context()))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// applyCatalogLLMSettings handles the v4.4.22 LLM settings POST
+// shape: a (provider, authMethod, ...) bundle that maps onto the
+// catalog + Profile_Store. Three sub-branches:
+//
+//  1. activeProfileKey supplied without new credentials → just
+//     write INTELLIRECON_LLM_PROFILE so the resolver picks up the
+//     existing Profile next request.
+//  2. authMethod=api_key with apiKey supplied → upsert an
+//     auth.Profile{Type: APIKey} for "<provider>:<profileId or
+//     'default'>", also write INTELLIRECON_LLM/INTELLIRECON_API_KEY/
+//     INTELLIRECON_API_BASE for legacy callers, and finally point
+//     INTELLIRECON_LLM_PROFILE at the new key so the resolver
+//     dispatches through the catalog branch.
+//  3. authMethod=oauth or none with no profile work → just sync
+//     the env-var side-channel (model + provider hint) so the
+//     legacy path still has something usable; OAuth profile work
+//     happens through /api/auth/profiles/oauth/{start,complete}.
+func (s *Server) applyCatalogLLMSettings(ctx context.Context, req llmSettingsRequest) error {
+	provider := strings.TrimSpace(req.Provider)
+	authMethod := strings.ToLower(strings.TrimSpace(req.AuthMethod))
+	activeProfileKey := strings.TrimSpace(req.ActiveProfileKey)
+	profileID := strings.TrimSpace(req.ProfileID)
+	if profileID == "" {
+		profileID = "default"
+	}
+
+	// Validate provider against the compiled-in catalog whenever
+	// it's supplied. The dashboard never sends a provider that
+	// isn't in the dropdown, but a hand-crafted POST can — we
+	// reject those with a 400 so the resolver never receives a
+	// stale pointer.
+	if provider != "" && s.catalog != nil {
+		if _, ok, err := s.catalog.Get(ctx, provider); err != nil {
+			return fmt.Errorf("catalog lookup: %w", err)
+		} else if !ok {
+			return fmt.Errorf("unknown provider %q", provider)
+		}
+	}
+
+	updates := map[string]string{}
+
+	// API_KEY path: persist the credential AS a profile, then point
+	// INTELLIRECON_LLM_PROFILE at it. We also continue to write the
+	// legacy INTELLIRECON_LLM / INTELLIRECON_API_KEY / INTELLIRECON_API_BASE
+	// trio so anyone still consuming those env vars (legacy
+	// scripts, the legacyResolver fallback) keeps working.
+	//
+	// The pointer must move whenever the operator switches provider —
+	// even if they leave the masked **** key in place (the UI tells them
+	// to keep it to preserve the saved key). Previously this whole branch
+	// was gated on a freshly-typed key, so switching provider with a
+	// masked key updated only the model env var and the provider reverted
+	// to the stale profile on reload.
+	if authMethod == "api_key" && provider != "" {
+		if s.profiles == nil {
+			return fmt.Errorf("profile store not initialized")
+		}
+		typedKey := strings.TrimSpace(req.APIKey)
+		hasTypedKey := typedKey != "" && !isMaskedSettingValue(req.APIKey)
+		if hasTypedKey {
+			// New key supplied: create/update the profile for this provider.
+			baseOverride := strings.TrimSpace(req.APIBaseOverride)
+			if baseOverride == "" {
+				baseOverride = strings.TrimSpace(req.APIBase)
+			}
+			prof := auth.Profile{
+				Provider:        provider,
+				ProfileID:       profileID,
+				Type:            auth.APIKey,
+				APIKey:          typedKey,
+				APIBaseOverride: baseOverride,
+			}
+			if err := s.profiles.Put(ctx, prof); err != nil {
+				return fmt.Errorf("save profile: %w", err)
+			}
+			activeProfileKey = prof.Key()
+		} else if activeProfileKey == "" {
+			// Masked/empty key and no explicit profile selected. Persist the
+			// provider switch without rewriting any credential:
+			//   1. If a profile already exists for <provider>:<profileId>,
+			//      point at it (preserving its stored key/base).
+			//   2. Otherwise carry over the current saved key (the masked
+			//      value the UI is showing == cfg.APIKey, or the active
+			//      profile's key) into a new profile for this provider so the
+			//      selection sticks.
+			target := auth.Profile{Provider: provider, ProfileID: profileID}
+			if existing, ok, err := s.profiles.Get(ctx, target.Key()); err != nil {
+				return fmt.Errorf("look up profile %q: %w", target.Key(), err)
+			} else if ok {
+				activeProfileKey = existing.Key()
+			} else {
+				carry := strings.TrimSpace(s.cfg.APIKey)
+				if carry == "" && strings.TrimSpace(s.cfg.LLMProfile) != "" {
+					if prof, ok, err := s.profiles.Get(ctx, strings.TrimSpace(s.cfg.LLMProfile)); err == nil && ok {
+						carry = strings.TrimSpace(prof.APIKey)
+					}
+				}
+				if carry != "" {
+					baseOverride := strings.TrimSpace(req.APIBaseOverride)
+					if baseOverride == "" {
+						baseOverride = strings.TrimSpace(req.APIBase)
+					}
+					prof := auth.Profile{
+						Provider:        provider,
+						ProfileID:       profileID,
+						Type:            auth.APIKey,
+						APIKey:          carry,
+						APIBaseOverride: baseOverride,
+					}
+					if err := s.profiles.Put(ctx, prof); err != nil {
+						return fmt.Errorf("save profile: %w", err)
+					}
+					activeProfileKey = prof.Key()
+				}
+			}
+		}
+	}
+
+	// activeProfileKey wins as the source of truth for
+	// INTELLIRECON_LLM_PROFILE. Either the api_key branch above set
+	// it, or the operator picked an existing profile from the
+	// list, or both fields are empty (auth_method=none / oauth-
+	// only flow) and we leave the pointer alone.
+	if activeProfileKey != "" {
+		// Guard against pointing the resolver at a profile that was never
+		// persisted (e.g. the operator clicked Save before completing the
+		// OAuth sign-in). Without this, INTELLIRECON_LLM_PROFILE would name a
+		// missing profile and every scan would fail the credential lookup.
+		if s.profiles != nil {
+			if _, ok, err := s.profiles.Get(ctx, activeProfileKey); err != nil {
+				return fmt.Errorf("look up profile %q: %w", activeProfileKey, err)
+			} else if !ok {
+				return fmt.Errorf("no saved credential for %q — complete the OAuth sign-in (or save an API key) before selecting it", activeProfileKey)
+			}
+		}
+		updates["INTELLIRECON_LLM_PROFILE"] = activeProfileKey
+	}
+
+	// Legacy env-var sync. Always written when the operator
+	// supplied a model so the legacy path stays runnable.
+	if model := strings.TrimSpace(req.Model); model != "" {
+		updates["INTELLIRECON_LLM"] = model
+	}
+
+	// Legacy env-var sync: INTELLIRECON_API_BASE.
+	// The WebUI sends apiBase only for the "custom" provider; for
+	// catalog providers it sends apiBaseOverride instead. Fall
+	// through: req.APIBase → req.APIBaseOverride → catalog entry
+	// BaseURL, so switching provider always updates the env file.
+	{
+		base := strings.TrimSpace(req.APIBase)
+		if base == "" {
+			base = strings.TrimSpace(req.APIBaseOverride)
+		}
+		if base == "" && provider != "" && s.catalog != nil {
+			if entry, ok, err := s.catalog.Get(ctx, provider); err == nil && ok {
+				base = strings.TrimSpace(entry.BaseURL)
+			}
+		}
+		if base != "" {
+			updates["INTELLIRECON_API_BASE"] = base
+		}
+	}
+	if !isMaskedSettingValue(req.APIKey) && strings.TrimSpace(req.APIKey) != "" {
+		updates["INTELLIRECON_API_KEY"] = strings.TrimSpace(req.APIKey)
+	}
+	if !isMaskedSettingValue(req.GeminiAPIKey) {
+		updates["GEMINI_API_KEY"] = strings.TrimSpace(req.GeminiAPIKey)
+	}
+	// Numeric settings still come through both shapes.
+	if req.LLMMaxRetries > 0 {
+		updates["INTELLIRECON_LLM_MAX_RETRIES"] = strconv.Itoa(clampInt(req.LLMMaxRetries, 0, 20))
+	}
+	if req.MemoryCompressorTimeout > 0 {
+		updates["INTELLIRECON_MEMORY_COMPRESSOR_TIMEOUT"] = strconv.Itoa(clampInt(req.MemoryCompressorTimeout, 5, 600))
+	}
+	if req.MaxIterations > 0 {
+		updates["INTELLIRECON_MAX_ITERATIONS"] = strconv.Itoa(clampInt(req.MaxIterations, 0, 1000))
+	}
+	if reasoning := strings.ToLower(strings.TrimSpace(req.ReasoningEffort)); reasoning != "" {
+		if !oneOf(reasoning, []string{"low", "medium", "high", "xhigh"}) {
+			return fmt.Errorf("invalid reasoning effort %q", req.ReasoningEffort)
+		}
+		updates["INTELLIRECON_REASONING_EFFORT"] = reasoning
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+	if _, err := s.applyEnvironmentUpdates(updates); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) handleEnvironmentSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(s.environmentSettings(false))
+	case http.MethodPost:
+		var req struct {
+			Values map[string]string `json:"values"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		restartRequired, err := s.applyEnvironmentUpdates(req.Values)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(s.environmentSettings(restartRequired))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) llmSettings(ctx context.Context) llmSettingsResponse {
+	resp := llmSettingsResponse{
+		Model:                   s.cfg.LLM,
+		APIBase:                 s.cfg.APIBase,
+		APIKey:                  maskSecretValue(s.cfg.APIKey),
+		HasAPIKey:               s.cfg.APIKey != "",
+		ReasoningEffort:         s.cfg.ReasoningEffort,
+		LLMMaxRetries:           s.cfg.LLMMaxRetries,
+		MemoryCompressorTimeout: s.cfg.MemCompTimeout,
+		MaxIterations:           s.cfg.MaxIterations,
+		GeminiAPIKey:            maskSecretValue(s.cfg.GeminiAPIKey),
+		HasGeminiAPIKey:         s.cfg.GeminiAPIKey != "",
+		EnvFile:                 intellireconEnvFilePath(),
+		ActiveProfileKey:        s.cfg.LLMProfile,
+		Profiles:                []llmProfileSummary{},
+	}
+
+	// Provider derivation: prefer cfg.LLMProfile (the explicit
+	// catalog pointer); fall back to parsing the legacy
+	// "<provider>/<model>" prefix in cfg.LLM. Both can be empty
+	// on a fresh install.
+	provider := ""
+	if key := strings.TrimSpace(s.cfg.LLMProfile); key != "" {
+		if i := strings.Index(key, ":"); i > 0 {
+			provider = key[:i]
+		}
+	}
+	if provider == "" {
+		if i := strings.Index(s.cfg.LLM, "/"); i > 0 {
+			provider = strings.ToLower(s.cfg.LLM[:i])
+		}
+	}
+	resp.Provider = provider
+
+	// AuthMethod derivation: dispatch precedence mirrors the
+	// resolver. cfg.LLMProfile present + Profile.Type drives the
+	// answer; otherwise cfg.APIKey indicates api_key; otherwise
+	// "" (operator hasn't picked anything yet).
+	authMethod := ""
+	if s.profiles != nil && strings.TrimSpace(s.cfg.LLMProfile) != "" {
+		if prof, ok, err := s.profiles.Get(ctx, strings.TrimSpace(s.cfg.LLMProfile)); err == nil && ok {
+			switch prof.Type {
+			case auth.OAuth:
+				authMethod = "oauth"
+			case auth.APIKey:
+				authMethod = "api_key"
+			}
+		}
+	}
+	if authMethod == "" && s.cfg.APIKey != "" {
+		authMethod = "api_key"
+	}
+	resp.AuthMethod = authMethod
+
+	// Profiles: filter to the active provider only. The full list
+	// surface lives at /api/auth/profiles; this field is a
+	// dashboard convenience so the LLM tab can render the saved
+	// credentials picker without a second roundtrip.
+	if s.profiles != nil && provider != "" {
+		all, err := s.profiles.List(ctx)
+		if err == nil {
+			for _, p := range all {
+				if p.Provider != provider {
+					continue
+				}
+				resp.Profiles = append(resp.Profiles, llmProfileSummaryFor(p))
+			}
+		}
+	}
+
+	return resp
+}
+
+// llmProfileSummaryFor produces the masked, dashboard-friendly view
+// of one auth.Profile. Credentials are NEVER returned in plaintext;
+// only the boolean has* flags + masked metadata.
+func llmProfileSummaryFor(p auth.Profile) llmProfileSummary {
+	out := llmProfileSummary{
+		Key:             p.Key(),
+		Provider:        p.Provider,
+		ProfileID:       p.ProfileID,
+		Type:            string(p.Type),
+		HasAccessToken:  p.AccessToken != "",
+		HasAPIKey:       p.APIKey != "",
+		APIBaseOverride: p.APIBaseOverride,
+		RequiresReauth:  p.RequiresReauth,
+	}
+	if !p.ExpiresAt.IsZero() {
+		out.ExpiresAt = p.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return out
+}
+
+func (s *Server) environmentSettings(restartRequired bool) environmentSettingsResponse {
+	defs := allEnvSettingDefinitions()
+	values := make([]envSettingValue, 0, len(defs))
+	for _, def := range defs {
+		value := s.envSettingValue(def.Key)
+		hasValue := os.Getenv(def.Key) != ""
+		if def.Sensitive {
+			value = maskSecretValue(value)
+		}
+		values = append(values, envSettingValue{
+			envSettingDefinition: def,
+			Value:                value,
+			HasValue:             hasValue,
+		})
+	}
+	sort.SliceStable(values, func(i, j int) bool {
+		if values[i].Category != values[j].Category {
+			return values[i].Category < values[j].Category
+		}
+		return values[i].Key < values[j].Key
+	})
+	return environmentSettingsResponse{
+		EnvFile:         intellireconEnvFilePath(),
+		Variables:       values,
+		RestartRequired: restartRequired,
+	}
+}
+
+func (s *Server) applyEnvironmentUpdates(values map[string]string) (bool, error) {
+	if len(values) == 0 {
+		return false, nil
+	}
+	defs := envDefinitionByKey()
+	effective := make(map[string]string, len(values))
+	restartRequired := false
+
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if !envSettingKeyRe.MatchString(key) {
+			return false, fmt.Errorf("invalid environment variable name %q", key)
+		}
+		def, ok := defs[key]
+		if !ok {
+			return false, fmt.Errorf("unsupported environment variable %q", key)
+		}
+		if def.Sensitive && isMaskedSettingValue(value) {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if strings.ContainsAny(value, "\r\n") {
+			return false, fmt.Errorf("%s cannot contain newlines", key)
+		}
+		normalized, err := normalizeEnvSettingValue(def, value)
+		if err != nil {
+			return false, err
+		}
+		value = normalized
+		effective[key] = value
+		if def.RequiresRestart {
+			restartRequired = true
+		}
+	}
+	if len(effective) == 0 {
+		return restartRequired, nil
+	}
+
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
+	if err := updateIntelliReconEnvFile(intellireconEnvFilePath(), effective); err != nil {
+		return false, err
+	}
+	for key, value := range effective {
+		if value == "" {
+			_ = os.Unsetenv(key)
+		} else {
+			_ = os.Setenv(key, value)
+		}
+	}
+	s.applyEnvironmentToRuntimeConfig(effective)
+	return restartRequired, nil
+}
+
+func (s *Server) applyEnvironmentToRuntimeConfig(values map[string]string) {
+	rateChanged := false
+	for key, value := range values {
+		switch key {
+		case "INTELLIRECON_LLM":
+			s.cfg.LLM = value
+		case "INTELLIRECON_API_BASE":
+			s.cfg.APIBase = value
+		case "INTELLIRECON_API_KEY":
+			s.cfg.APIKey = value
+		case "INTELLIRECON_LLM_PROFILE":
+			s.cfg.LLMProfile = value
+		case "INTELLIRECON_REASONING_EFFORT":
+			s.cfg.ReasoningEffort = valueOrDefault(value, "high")
+		case "INTELLIRECON_LLM_MAX_RETRIES":
+			s.cfg.LLMMaxRetries = parseIntSetting(value, 5)
+		case "INTELLIRECON_MEMORY_COMPRESSOR_TIMEOUT":
+			s.cfg.MemCompTimeout = parseIntSetting(value, 30)
+		case "INTELLIRECON_MAX_ITERATIONS":
+			s.cfg.MaxIterations = parseIntSetting(value, 0)
+		case "INTELLIRECON_WORKSPACE":
+			if value != "" {
+				s.cfg.Workspace = value
+			}
+		case "INTELLIRECON_DISABLE_BROWSER":
+			s.cfg.DisableBrowser = parseBoolSetting(value, false)
+		case "INTELLIRECON_RATE_LIMIT_REQUESTS":
+			s.cfg.RateLimitRequests = parseIntSetting(value, 60)
+			rateChanged = true
+		case "INTELLIRECON_RATE_LIMIT_WINDOW":
+			s.cfg.RateLimitWindow = parseIntSetting(value, 60)
+			rateChanged = true
+		case "INTELLIRECON_RATE_RPS":
+			s.cfg.RateLimitRPS = parseFloatSetting(value, 10)
+		case "INTELLIRECON_RATE_BURST":
+			s.cfg.RateLimitBurst = parseIntSetting(value, 20)
+		case "INTELLIRECON_TLS_SKIP_VERIFY":
+			s.cfg.TLSSkipVerify = parseBoolSetting(value, false)
+		case "CAIDO_PORT":
+			s.cfg.CaidoPort = parseIntSetting(value, 0)
+		case "CAIDO_API_TOKEN":
+			s.cfg.CaidoAPIToken = value
+		case "INTELLIRECON_TELEMETRY":
+			s.cfg.Telemetry = parseBoolSetting(value, true)
+		case "INTELLIRECON_OTEL_ENDPOINT":
+			s.cfg.OTelEndpoint = value
+		case "GEMINI_API_KEY":
+			s.cfg.GeminiAPIKey = value
+		case "AGENTMAIL_API_KEY":
+			s.cfg.AgentMailAPIKey = value
+		case "AGENTMAIL_POD":
+			s.cfg.AgentMailPod = value
+		case "INTELLIRECON_DISCORD_WEBHOOK":
+			s.cfg.DiscordWebhook = value
+			s.discordWebhook = value
+		case "INTELLIRECON_DISCORD_MIN_SEVERITY":
+			s.cfg.DiscordMinSeverity = value
+			s.discordMinSeverity = strings.ToLower(strings.TrimSpace(value))
+		case "INTELLIRECON_TELEGRAM_BOT_TOKEN":
+			s.cfg.TelegramBotToken = value
+			s.telegramBotToken = value
+		case "INTELLIRECON_TELEGRAM_CHAT_ID":
+			s.cfg.TelegramChatID = value
+			s.telegramChatID = value
+		case "INTELLIRECON_TELEGRAM_MIN_SEVERITY":
+			s.cfg.TelegramMinSeverity = value
+			s.telegramMinSeverity = strings.ToLower(strings.TrimSpace(value))
+		case "INTELLIRECON_USERNAME":
+			s.cfg.Username = value
+		case "INTELLIRECON_PASSWORD":
+			s.cfg.Password = value
+		case "INTELLIRECON_PASSWORD_HASH":
+			s.cfg.PasswordHash = value
+		case "INTELLIRECON_BIND":
+			s.cfg.BindAddr = valueOrDefault(value, "127.0.0.1")
+		case "INTELLIRECON_ALLOW_AUTO_INSTALL":
+			s.cfg.AllowAutoInstall = parseBoolSetting(value, os.Getuid() == 0)
+		case "INTELLIRECON_AUTO_INSTALL_SUDO":
+			s.cfg.AllowAutoInstallSudo = parseBoolSetting(value, false)
+		case "INTELLIRECON_USE_PROXY":
+			s.cfg.UseProxy = parseBoolSetting(value, false)
+		case "INTELLIRECON_PROXY_FILE":
+			s.cfg.ProxyFile = value
+		case "INTELLIRECON_PROXY_ROTATION":
+			s.cfg.ProxyRotation = valueOrDefault(value, "roundrobin")
+		case "INTELLIRECON_PROXY_URL":
+			s.cfg.ProxyURL = value
+		case "INTELLIRECON_BROWSER_PATH":
+			s.cfg.BrowserPath = value
+		}
+	}
+	if rateChanged {
+		requests := clampInt(s.cfg.RateLimitRequests, 1, 1000)
+		window := clampInt(s.cfg.RateLimitWindow, 10, 3600)
+		s.cfg.RateLimitRequests = requests
+		s.cfg.RateLimitWindow = window
+		if s.rateLimiter != nil {
+			s.rateLimiter.Stop()
+		}
+		s.rateLimiter = NewRateLimiter(requests, time.Duration(window)*time.Second)
+		log.Printf("Rate limiting updated: %d requests/%ds per IP", requests, window)
+	}
+}
+
+func (s *Server) envSettingValue(key string) string {
+	switch key {
+	case "INTELLIRECON_LLM":
+		return s.cfg.LLM
+	case "INTELLIRECON_API_BASE":
+		return s.cfg.APIBase
+	case "INTELLIRECON_API_KEY":
+		return s.cfg.APIKey
+	case "INTELLIRECON_LLM_PROFILE":
+		return s.cfg.LLMProfile
+	case "INTELLIRECON_REASONING_EFFORT":
+		return valueOrDefault(s.cfg.ReasoningEffort, "high")
+	case "INTELLIRECON_LLM_MAX_RETRIES":
+		return strconv.Itoa(s.cfg.LLMMaxRetries)
+	case "INTELLIRECON_MEMORY_COMPRESSOR_TIMEOUT":
+		return strconv.Itoa(s.cfg.MemCompTimeout)
+	case "INTELLIRECON_MAX_ITERATIONS":
+		return strconv.Itoa(s.cfg.MaxIterations)
+	case "INTELLIRECON_WORKSPACE":
+		return s.cfg.Workspace
+	case "INTELLIRECON_DISABLE_BROWSER":
+		return strconv.FormatBool(s.cfg.DisableBrowser)
+	case "INTELLIRECON_RATE_LIMIT_REQUESTS":
+		return strconv.Itoa(s.cfg.RateLimitRequests)
+	case "INTELLIRECON_RATE_LIMIT_WINDOW":
+		return strconv.Itoa(s.cfg.RateLimitWindow)
+	case "INTELLIRECON_RATE_RPS":
+		return strconv.FormatFloat(s.cfg.RateLimitRPS, 'f', -1, 64)
+	case "INTELLIRECON_RATE_BURST":
+		return strconv.Itoa(s.cfg.RateLimitBurst)
+	case "INTELLIRECON_TLS_SKIP_VERIFY":
+		return strconv.FormatBool(s.cfg.TLSSkipVerify)
+	case "CAIDO_PORT":
+		return strconv.Itoa(s.cfg.CaidoPort)
+	case "CAIDO_API_TOKEN":
+		return s.cfg.CaidoAPIToken
+	case "INTELLIRECON_TELEMETRY":
+		return strconv.FormatBool(s.cfg.Telemetry)
+	case "INTELLIRECON_OTEL_ENDPOINT":
+		return s.cfg.OTelEndpoint
+	case "GEMINI_API_KEY":
+		return s.cfg.GeminiAPIKey
+	case "AGENTMAIL_API_KEY":
+		return s.cfg.AgentMailAPIKey
+	case "AGENTMAIL_POD":
+		return s.cfg.AgentMailPod
+	case "INTELLIRECON_DISCORD_WEBHOOK":
+		return s.cfg.DiscordWebhook
+	case "INTELLIRECON_DISCORD_MIN_SEVERITY":
+		return s.cfg.DiscordMinSeverity
+	case "INTELLIRECON_TELEGRAM_BOT_TOKEN":
+		return s.cfg.TelegramBotToken
+	case "INTELLIRECON_TELEGRAM_CHAT_ID":
+		return s.cfg.TelegramChatID
+	case "INTELLIRECON_TELEGRAM_MIN_SEVERITY":
+		return s.cfg.TelegramMinSeverity
+	case "INTELLIRECON_USERNAME":
+		return s.cfg.Username
+	case "INTELLIRECON_PASSWORD":
+		return s.cfg.Password
+	case "INTELLIRECON_PASSWORD_HASH":
+		return s.cfg.PasswordHash
+	case "INTELLIRECON_BIND":
+		return valueOrDefault(s.cfg.BindAddr, "127.0.0.1")
+	case "INTELLIRECON_ALLOW_AUTO_INSTALL":
+		return strconv.FormatBool(s.cfg.AllowAutoInstall)
+	case "INTELLIRECON_AUTO_INSTALL_SUDO":
+		return strconv.FormatBool(s.cfg.AllowAutoInstallSudo)
+	case "INTELLIRECON_USE_PROXY":
+		return strconv.FormatBool(s.cfg.UseProxy)
+	case "INTELLIRECON_PROXY_FILE":
+		return s.cfg.ProxyFile
+	case "INTELLIRECON_PROXY_ROTATION":
+		return valueOrDefault(s.cfg.ProxyRotation, "roundrobin")
+	case "INTELLIRECON_PROXY_URL":
+		return s.cfg.ProxyURL
+	case "INTELLIRECON_BROWSER_PATH":
+		return s.cfg.BrowserPath
+	default:
+		return os.Getenv(key)
+	}
+}
+
+func updateIntelliReconEnvFile(path string, updates map[string]string) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read env file: %w", err)
+	}
+	lines := []string{}
+	if len(existing) > 0 {
+		lines = strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	}
+
+	seen := make(map[string]bool, len(updates))
+	newLines := make([]string, 0, len(lines)+len(updates)+1)
+	for _, line := range lines {
+		key, ok := envLineKey(line)
+		if !ok {
+			newLines = append(newLines, line)
+			continue
+		}
+		value, shouldUpdate := updates[key]
+		if !shouldUpdate {
+			newLines = append(newLines, line)
+			continue
+		}
+		seen[key] = true
+		if value == "" {
+			continue
+		}
+		newLines = append(newLines, formatEnvLine(key, value))
+	}
+
+	missing := make([]string, 0, len(updates))
+	for key, value := range updates {
+		if seen[key] || value == "" {
+			continue
+		}
+		missing = append(missing, key)
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 && len(newLines) > 0 {
+		last := strings.TrimSpace(newLines[len(newLines)-1])
+		if last != "" {
+			newLines = append(newLines, "")
+		}
+	}
+	for _, key := range missing {
+		newLines = append(newLines, formatEnvLine(key, updates[key]))
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create env dir: %w", err)
+	}
+	out := strings.TrimRight(strings.Join(newLines, "\n"), "\n")
+	if out != "" {
+		out += "\n"
+	}
+	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
+		return fmt.Errorf("write env file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod env file: %w", err)
+	}
+	return nil
+}
+
+func envLineKey(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	trimmed = strings.TrimPrefix(trimmed, "export ")
+	parts := strings.SplitN(trimmed, "=", 2)
+	if len(parts) != 2 {
+		return "", false
+	}
+	key := strings.TrimSpace(parts[0])
+	if !envSettingKeyRe.MatchString(key) {
+		return "", false
+	}
+	return key, true
+}
+
+func formatEnvLine(key, value string) string {
+	return key + "=" + value
+}
+
+func intellireconEnvFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "/root"
+	}
+	return filepath.Join(home, ".intellirecon.env")
+}
+
+func maskSecretValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) > 8 {
+		return "****" + value[len(value)-8:]
+	}
+	return "****"
+}
+
+func isMaskedSettingValue(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "****") || strings.Contains(value, "••••")
+}
+
+func parseIntSetting(value string, fallback int) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func parseFloatSetting(value string, fallback float64) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func parseBoolSetting(value string, fallback bool) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func normalizeEnvSettingValue(def envSettingDefinition, value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	switch def.InputType {
+	case "boolean":
+		return strconv.FormatBool(parseBoolSetting(value, false)), nil
+	case "select":
+		if len(def.Options) > 0 && !oneOf(value, def.Options) {
+			return "", fmt.Errorf("invalid value %q for %s", value, def.Key)
+		}
+	case "number":
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			return "", fmt.Errorf("%s must be a number", def.Key)
+		}
+	}
+	switch def.Key {
+	case "INTELLIRECON_RATE_LIMIT_REQUESTS":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 60), 1, 1000)), nil
+	case "INTELLIRECON_RATE_LIMIT_WINDOW":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 60), 10, 3600)), nil
+	case "INTELLIRECON_LLM_MAX_RETRIES":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 5), 0, 20)), nil
+	case "INTELLIRECON_MEMORY_COMPRESSOR_TIMEOUT":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 30), 5, 600)), nil
+	case "INTELLIRECON_MAX_ITERATIONS":
+		return strconv.Itoa(clampInt(parseIntSetting(value, 0), 0, 1000)), nil
+	}
+	return value, nil
+}
+
+func valueOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func oneOf(value string, values []string) bool {
+	for _, candidate := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}

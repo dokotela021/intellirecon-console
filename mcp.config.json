@@ -1,0 +1,37 @@
+{
+  "$comment": "MCP servers the IntelliRecon agent connects to. Each is spawned over stdio; failures are non-fatal (the agent still gets its built-in run_command / report_finding tools). Add any MCP server here — the bundled 'engine' below wires in its 150+ security tools once the IntelliRecon Engine API server is running on :8888. 'toolTimeouts' sets per-tool call ceilings in SECONDS ('default' applies to the whole server); slow subdomain/DNS enumerators (amass, fierce, dnsenum) need far more than the 300s global default. A ceiling is a cap, not a wait — a tool returns as soon as it finishes — so headroom is cheap; the operator can always hit Stop to cancel early.",
+  "mcpServers": {
+    "engine": {
+      "enabled": true,
+      "command": "./engine/intellirecon-env/bin/python",
+      "args": [
+        "./engine/intellirecon_mcp.py",
+        "--server",
+        "http://127.0.0.1:8888",
+        "--timeout",
+        "1800"
+      ],
+      "startupTimeoutMs": 60000,
+      "toolTimeouts": {
+        "default": 300,
+        "amass_scan": 1800,
+        "fierce_scan": 900,
+        "dnsenum_scan": 900,
+        "subfinder_scan": 600,
+        "nuclei_scan": 1200,
+        "gobuster_scan": 900,
+        "ffuf_scan": 900,
+        "nmap_scan": 900
+      }
+    },
+    "hackerone": {
+      "enabled": true,
+      "command": "node",
+      "args": ["./server/mcp-hackerone.mjs"],
+      "startupTimeoutMs": 15000,
+      "toolTimeouts": {
+        "default": 30
+      }
+    }
+  }
+}

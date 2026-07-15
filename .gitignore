@@ -1,0 +1,21 @@
+node_modules
+dist
+*.log
+.DS_Store
+.env
+intellirecon-runs/
+intellirecon.db*
+undefined
+undefined-shm
+undefined-wal
+
+# engine/ (Python)
+__pycache__/
+*.pyc
+engine/intellirecon-env/
+
+# scanner/ (Go)
+scanner/webui/node_modules/
+scanner/webui/dist/
+scanner/build/
+scanner/intellirecon
