@@ -186,6 +186,26 @@ curl -X POST http://localhost:8888/api/intelligence/analyze-target \
 
 ---
 
+## Usage
+
+Server boot:
+
+![Engine server starting up](assets/usage_server1.png)
+
+A live tool call, streamed through the API server's logging:
+
+![Live nmap_scan tool execution](assets/usage_server2.png)
+
+Driving it from the IntelliRecon console — a task handed to the agent:
+
+![Task submitted to the agent](assets/usage_input.png)
+
+...and the verified result it comes back with:
+
+![Agent result with real scan findings](assets/usage_output.png)
+
+---
+
 ## AI Client Integration Setup
 
 ### Claude Desktop Integration or Cursor
