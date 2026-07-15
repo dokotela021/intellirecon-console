@@ -20,13 +20,14 @@ Framework: FastMCP integration for tool orchestration
 import sys
 import os
 import argparse
+import asyncio
 import logging
 from typing import Dict, Any, Optional
 import requests
 import time
 from datetime import datetime
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 class IntelliReconColors:
     """Enhanced color palette matching the server's ModernVisualEngine.COLORS"""
@@ -276,12 +277,62 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     """
     mcp = FastMCP("intellirecon-ai-mcp")
 
+    async def _run_with_progress(
+        ctx: Context, endpoint: str, data: Dict[str, Any], match_hint: str
+    ) -> Dict[str, Any]:
+        """
+        Run a long-running engine tool call in the background while polling
+        the engine's own process dashboard (api/processes/dashboard) for
+        live progress, relaying it as MCP progress notifications.
+
+        This is what makes the MCP client's `resetTimeoutOnProgress` option
+        actually extend a call's timeout while real work is happening,
+        instead of it being a fixed wall-clock ceiling regardless of
+        progress. If the caller sent no progress token (older clients, or
+        clients that don't ask for progress), ctx.report_progress() is a
+        silent no-op — this still works, it just doesn't reset anything.
+
+        match_hint: substring (usually the target/domain/url) used to find
+        our process among possibly several concurrent ones in the
+        dashboard's process list, by matching against its truncated command
+        string. Best-effort: if two concurrent calls share a target, or the
+        substring doesn't appear in the (60-char-truncated) command, this
+        just won't find a match and progress reporting is skipped for that
+        poll — the underlying scan and its final result are unaffected
+        either way.
+        """
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(None, intellirecon_client.safe_post, endpoint, data)
+        while not task.done():
+            await asyncio.sleep(4)
+            if task.done():
+                break
+            try:
+                dashboard = await asyncio.to_thread(
+                    intellirecon_client.safe_get, "api/processes/dashboard"
+                )
+                for proc in dashboard.get("processes", []):
+                    if match_hint and match_hint in proc.get("command", ""):
+                        pct_str = str(proc.get("progress_percent", "0")).rstrip("%")
+                        try:
+                            pct = float(pct_str)
+                        except ValueError:
+                            pct = 0.0
+                        eta = proc.get("eta", "")
+                        await ctx.report_progress(pct, 100, f"{proc.get('status', 'running')} (ETA {eta})")
+                        break
+            except Exception:
+                # Progress reporting is best-effort — never let a dashboard
+                # poll failure interrupt the actual scan.
+                pass
+        return await task
+
     # ============================================================================
     # CORE NETWORK SCANNING TOOLS
     # ============================================================================
 
     @mcp.tool()
-    def nmap_scan(target: str, scan_type: str = "-sV", ports: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def nmap_scan(ctx: Context, target: str, scan_type: str = "-sV", ports: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute an enhanced Nmap scan against a target with real-time logging.
 
@@ -304,7 +355,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
 
         # Use enhanced error handling by default
         data["use_recovery"] = True
-        result = intellirecon_client.safe_post("api/tools/nmap", data)
+        result = await _run_with_progress(ctx, "api/tools/nmap", data, target)
 
         if result.get("success"):
             logger.info(f"{IntelliReconColors.SUCCESS}✅ Nmap scan completed successfully for {target}{IntelliReconColors.RESET}")
@@ -324,7 +375,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def gobuster_scan(url: str, mode: str = "dir", wordlist: str = "/usr/share/wordlists/dirb/common.txt", additional_args: str = "") -> Dict[str, Any]:
+    async def gobuster_scan(ctx: Context, url: str, mode: str = "dir", wordlist: str = "/usr/share/wordlists/dirb/common.txt", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Gobuster to find directories, DNS subdomains, or virtual hosts with enhanced logging.
 
@@ -347,7 +398,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
 
         # Use enhanced error handling by default
         data["use_recovery"] = True
-        result = intellirecon_client.safe_post("api/tools/gobuster", data)
+        result = await _run_with_progress(ctx, "api/tools/gobuster", data, url)
 
         if result.get("success"):
             logger.info(f"{IntelliReconColors.SUCCESS}✅ Gobuster scan completed for {url}{IntelliReconColors.RESET}")
@@ -368,7 +419,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def nuclei_scan(target: str, severity: str = "", tags: str = "", template: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def nuclei_scan(ctx: Context, target: str, severity: str = "", tags: str = "", template: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Nuclei vulnerability scanner with enhanced logging and real-time progress.
 
@@ -393,7 +444,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
 
         # Use enhanced error handling by default
         data["use_recovery"] = True
-        result = intellirecon_client.safe_post("api/tools/nuclei", data)
+        result = await _run_with_progress(ctx, "api/tools/nuclei", data, target)
 
         if result.get("success"):
             logger.info(f"{IntelliReconColors.SUCCESS}✅ Nuclei scan completed for {target}{IntelliReconColors.RESET}")
@@ -1221,7 +1272,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def ffuf_scan(url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", mode: str = "directory", match_codes: str = "200,204,301,302,307,401,403", additional_args: str = "") -> Dict[str, Any]:
+    async def ffuf_scan(ctx: Context, url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", mode: str = "directory", match_codes: str = "200,204,301,302,307,401,403", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute FFuf for web fuzzing with enhanced logging.
 
@@ -1243,7 +1294,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting FFuf {mode} fuzzing: {url}")
-        result = intellirecon_client.safe_post("api/tools/ffuf", data)
+        result = await _run_with_progress(ctx, "api/tools/ffuf", data, url)
         if result.get("success"):
             logger.info(f"✅ FFuf fuzzing completed for {url}")
         else:
@@ -1285,7 +1336,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def amass_scan(domain: str, mode: str = "enum", additional_args: str = "") -> Dict[str, Any]:
+    async def amass_scan(ctx: Context, domain: str, mode: str = "enum", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Amass for subdomain enumeration with enhanced logging.
 
@@ -1303,7 +1354,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Amass {mode}: {domain}")
-        result = intellirecon_client.safe_post("api/tools/amass", data)
+        result = await _run_with_progress(ctx, "api/tools/amass", data, domain)
         if result.get("success"):
             logger.info(f"✅ Amass completed for {domain}")
         else:
@@ -1343,7 +1394,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def subfinder_scan(domain: str, silent: bool = True, all_sources: bool = False, additional_args: str = "") -> Dict[str, Any]:
+    async def subfinder_scan(ctx: Context, domain: str, silent: bool = True, all_sources: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Subfinder for passive subdomain enumeration with enhanced logging.
 
@@ -1363,7 +1414,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Subfinder: {domain}")
-        result = intellirecon_client.safe_post("api/tools/subfinder", data)
+        result = await _run_with_progress(ctx, "api/tools/subfinder", data, domain)
         if result.get("success"):
             logger.info(f"✅ Subfinder completed for {domain}")
         else:
@@ -3591,7 +3642,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def fierce_scan(domain: str, dns_server: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def fierce_scan(ctx: Context, domain: str, dns_server: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute fierce for DNS reconnaissance with enhanced logging.
 
@@ -3609,7 +3660,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Fierce DNS recon: {domain}")
-        result = intellirecon_client.safe_post("api/tools/fierce", data)
+        result = await _run_with_progress(ctx, "api/tools/fierce", data, domain)
         if result.get("success"):
             logger.info(f"✅ Fierce completed for {domain}")
         else:
@@ -3617,7 +3668,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def dnsenum_scan(domain: str, dns_server: str = "", wordlist: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def dnsenum_scan(ctx: Context, domain: str, dns_server: str = "", wordlist: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute dnsenum for DNS enumeration with enhanced logging.
 
@@ -3637,7 +3688,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting DNSenum: {domain}")
-        result = intellirecon_client.safe_post("api/tools/dnsenum", data)
+        result = await _run_with_progress(ctx, "api/tools/dnsenum", data, domain)
         if result.get("success"):
             logger.info(f"✅ DNSenum completed for {domain}")
         else:

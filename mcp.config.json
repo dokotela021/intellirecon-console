@@ -9,19 +9,19 @@
         "--server",
         "http://127.0.0.1:8888",
         "--timeout",
-        "1800"
+        "3600"
       ],
       "startupTimeoutMs": 60000,
       "toolTimeouts": {
         "default": 300,
-        "amass_scan": 1800,
-        "fierce_scan": 900,
-        "dnsenum_scan": 900,
-        "subfinder_scan": 600,
-        "nuclei_scan": 1200,
-        "gobuster_scan": 900,
-        "ffuf_scan": 900,
-        "nmap_scan": 900
+        "amass_scan": 3600,
+        "fierce_scan": 1800,
+        "dnsenum_scan": 1800,
+        "subfinder_scan": 1200,
+        "nuclei_scan": 2400,
+        "gobuster_scan": 1800,
+        "ffuf_scan": 1800,
+        "nmap_scan": 1800
       }
     },
     "hackerone": {

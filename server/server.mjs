@@ -557,7 +557,7 @@ function runCommand(command, timeoutSeconds = 120, signal) {
   });
 }
 
-async function executeTool(name, input, onFinding, signal) {
+async function executeTool(name, input, onFinding, signal, onProgress) {
   if (name === "run_command") {
     return runCommand(String(input.command || ""), Number(input.timeout_seconds) || 120, signal);
   }
@@ -673,7 +673,17 @@ async function executeTool(name, input, onFinding, signal) {
       // Cap the wait, but let servers that emit progress notifications keep the
       // request alive past the base timeout (long crawls, brute-forcers, etc.).
       // `signal` forwards an operator "stop" as an MCP cancellation.
-      { timeout: info.timeoutMs || MCP_CALL_TIMEOUT_MS, resetTimeoutOnProgress: true, signal },
+      //
+      // resetTimeoutOnProgress only actually does anything if a progress
+      // token is attached to the outgoing request, which the SDK only does
+      // when an `onprogress` callback is present here — without it the
+      // ceiling is a fixed wall-clock cap regardless of real progress.
+      {
+        timeout: info.timeoutMs || MCP_CALL_TIMEOUT_MS,
+        resetTimeoutOnProgress: true,
+        signal,
+        onprogress: (p) => onProgress?.(p),
+      },
     );
     const text = (result.content || [])
       .map((c) => (c.type === "text" ? c.text : JSON.stringify(c)))
@@ -1028,6 +1038,7 @@ async function runAgentTurn(ws, session, userText) {
             send(ws, { type: "finding", finding });
           },
           controller.signal,
+          (p) => send(ws, { type: "tool_progress", id: tu.id, name: tu.name, progress: p.progress, total: p.total, message: p.message }),
         );
         session.inflight.delete(tu.id);
         send(ws, { type: "tool_result", id: tu.id, name: tu.name, ok, output });
