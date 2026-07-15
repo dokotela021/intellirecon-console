@@ -177,6 +177,12 @@ If IntelliRecon saves you a triage cycle, please **[⭐ star the repo](https://g
 | **Continuous security testing** | Run as a system service with `intellirecon --start`. Scan on a schedule, stream findings to Discord or Telegram, and generate branded PDF reports for stakeholders. |
 | **DAST automation** | Browser-driven testing for web applications — auth flows, forms, JavaScript-rendered content, and runtime behavior. Integrates with Caido for proxy traffic inspection. |
 
+## Screenshots
+
+| Overview dashboard | Scan detail | Findings |
+| ------------------- | ------------ | -------- |
+| ![IntelliRecon overview dashboard](assets/screenshot-1.png) | ![IntelliRecon scan detail](assets/screenshot-2.png) | ![IntelliRecon findings](assets/screenshot-3.png) |
+
 ## Features
 
 | Area           | Capabilities                                                                                                                |

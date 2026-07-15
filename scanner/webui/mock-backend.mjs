@@ -212,6 +212,30 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // -------- Findings ---------------------------------------------------------
+  // Flattened from each instance's `vulns` — there's no separate findings
+  // store in the mock, mirroring how the real backend derives /api/findings
+  // from per-scan results.
+  const flatFindings = () =>
+    state.instances.flatMap((inst) =>
+      (inst.vulns ?? []).map((v) => ({
+        ...v,
+        scan_id: inst.id,
+        scan_target: inst.parent_target || inst.targets,
+        scan_started_at: inst.started_at,
+      })),
+    );
+  if (method === "GET" && url === "/api/findings") {
+    return send(res, flatFindings());
+  }
+  if (method === "GET" && url === "/api/findings/summary") {
+    const totals = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    for (const f of flatFindings()) {
+      if (f.severity in totals) totals[f.severity] += 1;
+    }
+    return send(res, { totals, as_of: nowIso(), etag: String(Date.now()) });
+  }
+
   // -------- Instances -------------------------------------------------------
   if (method === "GET" && url === "/api/instances") {
     return send(res, { instances: state.instances, resources: state.resources });
@@ -220,6 +244,15 @@ const server = http.createServer(async (req, res) => {
   if (instOne && method === "GET") {
     const inst = state.instances.find((i) => i.id === instOne[1]);
     return inst ? send(res, inst) : send(res, { error: "not found" }, 404);
+  }
+  const instEvents = url.match(/^\/api\/instances\/([^/]+)\/events$/);
+  if (instEvents && method === "GET") {
+    const inst = state.instances.find((i) => i.id === instEvents[1]);
+    if (!inst) return send(res, { error: "not found" }, 404);
+    // No persisted event history in the mock — the live feed comes from the
+    // WS stream instead. Must be an array: the SPA does `(q.data ?? []).map`,
+    // which only guards null/undefined, not other shapes.
+    return send(res, []);
   }
   const instStop = url.match(/^\/api\/instances\/([^/]+)\/stop$/);
   if (instStop && method === "POST") {
