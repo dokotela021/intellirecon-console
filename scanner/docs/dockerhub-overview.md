@@ -1,5 +1,10 @@
 # IntelliRecon — AI Autonomous Penetration Testing
 
+> [!NOTE]
+> This file is draft copy for a future Docker Hub listing. No image is
+> currently published anywhere for this repo — see the main README's Quick
+> Start for the one method that actually works today (build from source).
+
 **Self-hosted AI pentester that finds, exploits, and verifies real vulnerabilities.**
 
 Most scanners *detect*. IntelliRecon *proves* — an autonomous LLM agent works a full 22-phase methodology, then an independent verifier re-exploits every finding before it's reported, so you get proof with evidence, not a wall of maybes to triage.
@@ -21,18 +26,12 @@ docker run --rm -p 9137:9137 \
   -e INTELLIRECON_LLM=minimax/MiniMax-M3 \
   -e INTELLIRECON_API_KEY=your_provider_api_key \
   -v intellirecon-data:/data \
-  intellirecon/intellirecon:latest
+  dokotela021/intellirecon-console:latest
 ```
 
 Then open **http://127.0.0.1:9137**.
 
 > Use IntelliRecon only against systems you own or are explicitly authorized to test.
-
----
-
-## Reviewing GitHub pull requests (free, no install)
-
-Prefer security review straight on your PRs? Install the **[IntelliRecon GitHub App](https://github.com/apps/intellirecon/installations/new)** — it comments a security review on each pull request's diff (injection, broken auth/IDOR, SSRF, secrets, unsafe patterns), updates in place on new commits, and re-runs when you comment `@intellirecon review`. No workflow file, API key, or account required. This container image is for the deeper, self-hosted exploit-verified pentest.
 
 ---
 
@@ -71,9 +70,4 @@ An extensive toolset ships preinstalled — `nmap`, `nuclei`, `httpx`, `subfinde
 
 ## Links
 
-- **Source & docs:** https://github.com/intellirecon/intellirecon
-- **Documentation:** https://docs.intellirecon.com
-- **Hosted (no install):** https://www.intellirecon.com
-- **One-line install (any Linux, amd64/arm64):** `curl -sSL https://www.intellirecon.com/install | bash`
-
-Released under the MIT License.
+- **Source:** https://github.com/dokotela021/intellirecon-console

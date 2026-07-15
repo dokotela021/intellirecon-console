@@ -583,7 +583,7 @@ AI Agent: "Thank you for clarifying ownership and intent. To proceed with a pene
 - **Streamlined Installation Process** - One-command setup with automated dependency management
 - **Docker Container Support** - Containerized deployment for consistent environments
 - **250+ Specialized AI Agents/Tools** - Expanded from 150+ to 250+ autonomous security agents
-- **Native Desktop Client** - Full-featured Application ([www.intellirecon.com](https://www.intellirecon.com))
+- **Native Desktop Client** - Full-featured desktop application (planned)
 - **Advanced Web Automation** - Enhanced Selenium integration with anti-detection
 - **JavaScript Runtime Analysis** - Deep DOM inspection and dynamic content handling
 - **Memory Optimization** - 40% reduction in resource usage for large-scale operations

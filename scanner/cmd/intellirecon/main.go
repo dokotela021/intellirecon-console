@@ -113,7 +113,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "❌ Failed to fetch latest version from GitHub\n")
 			fmt.Fprintf(os.Stderr, "   This is usually caused by GitHub API rate limiting (60 req/hour for unauthenticated users).\n")
 			fmt.Fprintf(os.Stderr, "   Try again in a few minutes, or update manually:\n")
-			fmt.Fprintf(os.Stderr, "   wget -O $(which intellirecon) https://github.com/intellirecon/intellirecon/releases/latest/download/intellirecon-linux-amd64\n")
+			fmt.Fprintf(os.Stderr, "   wget -O $(which intellirecon) https://github.com/dokotela021/intellirecon-console/releases/latest/download/intellirecon-linux-amd64\n")
 			os.Exit(1)
 		}
 
@@ -143,56 +143,16 @@ func main() {
 		}
 
 	goInstallFallback:
-		// Fallback: use go install with explicit version
-		fmt.Printf("Installing v%s via go install...\n", latestVer)
-		cmd := exec.Command("go", "install", "-v", "-ldflags", "-X main.version="+latestVer, "github.com/intellirecon/intellirecon/v4/cmd/intellirecon@v"+latestVer)
-		// GOPRIVATE makes the toolchain skip the public proxy and checksum DB
-		// for our module path; GOSUMDB=off avoids hitting sum.golang.org for
-		// this private module. (GONOSUMCHECK / GONOSUMDB are not real env vars.)
-		cmd.Env = append(os.Environ(),
-			"GOPROXY=direct",
-			"GOPRIVATE=github.com/intellirecon/*",
-			"GOSUMDB=off",
-		)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Update failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "\nManual install:\n")
-			fmt.Fprintf(os.Stderr, "  GOPROXY=direct GOPRIVATE=github.com/intellirecon/* GOSUMDB=off go install -v github.com/intellirecon/intellirecon/v4/cmd/intellirecon@v%s\n", latestVer)
-			os.Exit(1)
-		}
-
-		// go install puts the binary in $GOPATH/bin — copy it to the actual
-		// install path if they differ (e.g. /usr/local/bin vs ~/go/bin).
-		goPath := os.Getenv("GOPATH")
-		if goPath == "" {
-			goPath = filepath.Join(os.Getenv("HOME"), "go")
-		}
-		goBinPath := filepath.Join(goPath, "bin", "intellirecon")
-		if goBinPath != installPath {
-			if _, err := os.Stat(goBinPath); err == nil {
-				// On Linux, you can't overwrite a running binary ("text file busy").
-				// Remove the old binary first, then move the new one in place.
-				_ = os.Remove(installPath) // ignore error if not exists
-				mvCmd := exec.Command("mv", goBinPath, installPath)
-				if mvErr := mvCmd.Run(); mvErr != nil {
-					// Fall back to sudo
-					cpCmd := exec.Command("sudo", "sh", "-c", fmt.Sprintf("rm -f %s && mv %s %s", installPath, goBinPath, installPath))
-					if sudoErr := cpCmd.Run(); sudoErr != nil {
-						fmt.Fprintf(os.Stderr, "⚠️  Could not copy binary to %s: %v\n", installPath, sudoErr)
-						fmt.Fprintf(os.Stderr, "   New binary is at: %s\n", goBinPath)
-					}
-				}
-				_ = os.Chmod(installPath, 0755) //nolint:gosec // G302: installed binary must be executable
-			}
-		}
-
-		fmt.Println("✅ Updated successfully!")
-		verCmd := exec.Command(installPath, "--version")
-		verCmd.Stdout = os.Stdout
-		_ = verCmd.Run()
-		os.Exit(0)
+		// `go install <module>@version` only works when the fetched module's
+		// go.mod declares itself under that exact import path. This module
+		// is declared as a bare name (`module intellirecon-scanner`, not a
+		// fetchable VCS path), so go install can never resolve it — there is
+		// no working fallback here short of renaming the module. Point the
+		// operator at the one update path that does work: pull and rebuild.
+		fmt.Fprintf(os.Stderr, "❌ No prebuilt binary is available for automatic update.\n")
+		fmt.Fprintf(os.Stderr, "\nUpdate manually by rebuilding from source:\n")
+		fmt.Fprintf(os.Stderr, "  cd /path/to/intellirecon-console/scanner && git pull && make build && sudo install -m 755 build/intellirecon %s\n", installPath)
+		os.Exit(1)
 	}
 
 	cfg := config.Get()
@@ -846,7 +806,7 @@ func autoUpdate() {
 	} else {
 		// Fallback to go install
 		fmt.Println("   Installing update via go install...")
-		cmd := exec.Command("go", "install", "-v", "-ldflags", "-X main.version="+latestVer, "github.com/intellirecon/intellirecon/v4/cmd/intellirecon@v"+latestVer)
+		cmd := exec.Command("go", "install", "-v", "-ldflags", "-X main.version="+latestVer, "github.com/dokotela021/intellirecon-console/v4/cmd/intellirecon@v"+latestVer)
 		cmd.Env = append(os.Environ(),
 			"GOPROXY=direct",
 			"GOPRIVATE=github.com/intellirecon/*",
@@ -936,7 +896,7 @@ func execRestart(path string, argv, env []string) error {
 func fetchLatestRelease() (version string, downloadURL string) {
 	client := &http.Client{Timeout: 15 * time.Second}
 
-	req, err := http.NewRequest("GET", "https://api.github.com/repos/intellirecon/intellirecon/releases/latest", nil)
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/dokotela021/intellirecon-console/releases/latest", nil)
 	if err != nil {
 		return "", ""
 	}
@@ -988,7 +948,7 @@ func fetchLatestRelease() (version string, downloadURL string) {
 
 // fetchLatestTag uses the git tags API as a fallback when releases API is rate-limited.
 func fetchLatestTag(client *http.Client) (string, string) {
-	req, err := http.NewRequest("GET", "https://api.github.com/repos/intellirecon/intellirecon/tags?per_page=1", nil)
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/dokotela021/intellirecon-console/tags?per_page=1", nil)
 	if err != nil {
 		return "", ""
 	}
@@ -1017,7 +977,7 @@ func fetchLatestTag(client *http.Client) (string, string) {
 	}
 
 	wantName := fmt.Sprintf("intellirecon-%s-%s", runtime.GOOS, runtime.GOARCH)
-	downloadURL := fmt.Sprintf("https://github.com/intellirecon/intellirecon/releases/download/v%s/%s", ver, wantName)
+	downloadURL := fmt.Sprintf("https://github.com/dokotela021/intellirecon-console/releases/download/v%s/%s", ver, wantName)
 	return ver, downloadURL
 }
 

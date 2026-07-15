@@ -2,7 +2,7 @@
 #
 # IntelliRecon installer — one-line install of the latest release binary.
 #
-#   curl -sSL https://raw.githubusercontent.com/intellirecon/intellirecon/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/dokotela021/intellirecon-console/main/install.sh | bash
 #
 # What it does:
 #   1. Detects your OS and CPU architecture.
@@ -15,7 +15,7 @@
 #
 set -euo pipefail
 
-REPO="intellirecon/intellirecon"
+REPO="dokotela021/intellirecon-console"
 BINARY="intellirecon"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -93,5 +93,3 @@ echo "         INTELLIRECON_API_KEY=your_provider_api_key"
 echo "    2. Launch the dashboard:"
 echo "         ${BINARY} --web"
 echo "    3. Open http://127.0.0.1:9137"
-echo ""
-echo "  Prefer zero setup? Try the hosted version: https://www.intellirecon.com"

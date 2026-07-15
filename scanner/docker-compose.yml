@@ -1,16 +1,18 @@
 # IntelliRecon — one-command run. Publishes the dashboard on http://localhost:9137
 # and persists all data (scans, reports, and settings) to a named volume.
 #
-#   docker compose up -d
+#   docker compose up -d --build
 #   docker compose logs -f      # shows the generated admin password on first run
+#
+# No image is published anywhere (no release has been cut yet), so this builds
+# from the Dockerfile in this directory rather than pulling.
 #
 # You do NOT need an LLM key to start — the dashboard launches without one and
 # you can configure the model + API key under Settings → LLM (it persists to the
 # volume). Set the env vars below only if you'd rather bake them in.
 services:
   intellirecon:
-    image: intellirecon/intellirecon:latest
-    # Or build locally instead of pulling:  build: .
+    build: .
     ports:
       - "9137:9137"
     # Uncomment to bake in credentials / LLM (all optional). If you omit the

@@ -3,8 +3,8 @@
 # Triggers on version tags (vX.Y.Z, pushed by release.sh) and can be run
 # manually. Publishes the batteries-included amd64 image tagged with the
 # version and `latest` to:
-#   - GitHub Container Registry: ghcr.io/intellirecon/intellirecon   (always)
-#   - Docker Hub:                docker.io/intellirecon/intellirecon (when the
+#   - GitHub Container Registry: ghcr.io/dokotela021/intellirecon-console   (always)
+#   - Docker Hub:                docker.io/dokotela021/intellirecon-console (when the
 #     DOCKERHUB_USERNAME + DOCKERHUB_TOKEN repo secrets are set)
 #
 # The Docker Hub target is OPTIONAL and self-gating: with no secrets, the run
@@ -71,11 +71,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # GHCR always; Docker Hub (docker.io/intellirecon/intellirecon) only when the
+          # GHCR always; Docker Hub (docker.io/dokotela021/intellirecon-console) only when the
           # secret is present — the empty line is ignored by the action.
           images: |
             ghcr.io/${{ github.repository }}
-            ${{ env.DOCKERHUB_USER != '' && 'docker.io/intellirecon/intellirecon' || '' }}
+            ${{ env.DOCKERHUB_USER != '' && 'docker.io/dokotela021/intellirecon-console' || '' }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

@@ -3,14 +3,10 @@
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-111111?style=for-the-badge&logo=linux&logoColor=white)](#installation)
-[![Hosted](https://img.shields.io/badge/Hosted-www.intellirecon.com-6d28d9?style=for-the-badge&logo=icloud&logoColor=white)](https://www.intellirecon.com/)
-[![GitHub stars](https://img.shields.io/github/stars/intellirecon/intellirecon?style=for-the-badge&logo=github&color=yellow)](https://github.com/intellirecon/intellirecon/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/intellirecon/intellirecon?style=for-the-badge&logo=github&color=blue)](https://github.com/intellirecon/intellirecon/network/members)
-[![GitHub release](https://img.shields.io/github/v/release/intellirecon/intellirecon?style=for-the-badge&logo=github&color=green)](https://github.com/intellirecon/intellirecon/releases)
+[![GitHub stars](https://img.shields.io/github/stars/dokotela021/intellirecon-console?style=for-the-badge&logo=github&color=yellow)](https://github.com/dokotela021/intellirecon-console/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/dokotela021/intellirecon-console?style=for-the-badge&logo=github&color=blue)](https://github.com/dokotela021/intellirecon-console/network/members)
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/intellirecon/intellirecon)
-
-<a href="https://trendshift.io/repositories/35278?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-35278" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/35278/daily?language=Go" alt="intellirecon/intellirecon | Trendshift" width="250" height="55"/></a>
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/dokotela021/intellirecon-console)
 
 </div>
 
@@ -24,22 +20,26 @@
   <a href="#quick-start">Quick Start</a> ·
   <a href="#why-intellirecon">Why IntelliRecon</a> ·
   <a href="#features">Features</a> ·
-  <a href="#use-cases">Use Cases</a> ·
-  <a href="https://www.intellirecon.com/">Hosted Cloud</a> ·
-  <a href="https://docs.intellirecon.com">Docs</a>
+  <a href="#use-cases">Use Cases</a>
 </p>
 
 ---
 
 ## Quick Start
 
-**Install (one line):**
+> [!NOTE]
+> No release has been published yet, so the only working install path right now is building from source. The commands below are the real, verified ones — no hosted service, no prebuilt binary, no published Docker image exist for this repo.
+
+**Build from source** (needs Go 1.24+ and Node.js):
 
 ```bash
-curl -sSL https://www.intellirecon.com/install | bash
+git clone https://github.com/dokotela021/intellirecon-console.git
+cd intellirecon-console/scanner
+make build
+sudo install -m 755 build/intellirecon /usr/local/bin/intellirecon
 ```
 
-This downloads the prebuilt binary for your platform (Linux amd64/arm64) from the latest release. Then point it at your LLM provider in `~/.intellirecon.env`:
+Then point it at your LLM provider in `~/.intellirecon.env`:
 
 ```bash
 INTELLIRECON_LLM=minimax/MiniMax-M3
@@ -52,55 +52,19 @@ Launch the dashboard and open `http://127.0.0.1:9137`:
 intellirecon --web
 ```
 
-**Or run with Docker — batteries included, no toolchain needed:**
+**Or run it in Docker, built locally** (no image is published, so build it yourself):
 
 ```bash
-docker run --rm -p 9137:9137 \
-  -v intellirecon-data:/data \
-  intellirecon/intellirecon:latest
+docker build -t intellirecon .
+docker run --rm -p 9137:9137 -v intellirecon-data:/data intellirecon
 ```
 
 Open `http://localhost:9137`. You **don't need an LLM key to start** — the dashboard launches without one; set the model + API key under **Settings → LLM** (it persists to the `/data` volume). If you don't pass `INTELLIRECON_USERNAME`/`INTELLIRECON_PASSWORD`, a random admin password is generated and printed to the container logs on first run.
 
-**Easiest — Docker Compose** (maps the port + a persistent volume for you):
-
-```bash
-curl -sSLO https://raw.githubusercontent.com/intellirecon/intellirecon/main/docker-compose.yml
-docker compose up -d
-docker compose logs -f   # shows the generated admin password on first start
-```
-
-The image ships an extensive offensive-security toolset preinstalled (nmap, nuclei, httpx, subfinder, katana, ffuf, gobuster, sqlmap, masscan, dalfox, feroxbuster, and more) **and** keeps every package manager (apt, go, cargo, pipx, npm) available so the agent can still auto-install anything missing at runtime. It runs as root inside the container by design — treat the container as a disposable, network-isolated scanning sandbox and never expose the dashboard without auth. (amd64 image; the installer above covers arm64.)
-
-**Or build from source** (needs Go 1.25+ and Node.js):
-
-```bash
-git clone https://github.com/intellirecon/intellirecon.git
-cd intellirecon
-make build
-sudo install -m 755 build/intellirecon /usr/local/bin/intellirecon
-```
-
-> [!TIP]
-> Prefer zero setup? A fully managed version runs at [www.intellirecon.com](https://www.intellirecon.com/) — click-to-scan, no install or API keys required.
-
-### Review pull requests automatically — free GitHub App
-
-Want a security review on every pull request with zero setup? Install the **[IntelliRecon GitHub App](https://github.com/apps/intellirecon)**. It reads each PR's diff and comments a security review — injection, broken auth/IDOR, SSRF, secrets, unsafe patterns — right on the pull request. Updates in place on new commits, and you can comment **`@intellirecon review`** to re-run on demand. No workflow file, no API key, no account — and it's free.
-
-<div align="center">
-
-[**➕ Add IntelliRecon to GitHub →**](https://github.com/apps/intellirecon/installations/new)
-
-</div>
-
-For merge gating and full exploit-verified pentests in CI, use the [hosted scanner](https://www.intellirecon.com/) or the GitHub Action.
+The image ships an extensive offensive-security toolset preinstalled (nmap, nuclei, httpx, subfinder, katana, ffuf, gobuster, sqlmap, masscan, dalfox, feroxbuster, and more) **and** keeps every package manager (apt, go, cargo, pipx, npm) available so the agent can still auto-install anything missing at runtime. It runs as root inside the container by design — treat the container as a disposable, network-isolated scanning sandbox and never expose the dashboard without auth.
 
 > [!IMPORTANT]
 > Use IntelliRecon only on systems you own or have explicit permission to test.
-
-> [!TIP]
-> Prefer not to self-host? A fully managed version is available at [www.intellirecon.com](https://www.intellirecon.com/) — click-to-scan, no install or API keys required.
 
 ## Contents
 
@@ -163,7 +127,7 @@ Most scanners **detect**. IntelliRecon **proves**. An autonomous agent works thr
 
 > Directional comparison — Nuclei and ZAP are excellent at what they do. IntelliRecon adds the reasoning-heavy discovery and exploit-verification layer on top.
 
-If IntelliRecon saves you a triage cycle, please **[⭐ star the repo](https://github.com/intellirecon/intellirecon)** — it genuinely helps others find it.
+If IntelliRecon saves you a triage cycle, please **[⭐ star the repo](https://github.com/dokotela021/intellirecon-console)** — it genuinely helps others find it.
 
 ## Use Cases
 
@@ -197,31 +161,29 @@ If IntelliRecon saves you a triage cycle, please **[⭐ star the repo](https://g
 
 ## Installation
 
-The fastest paths need no toolchain at all.
+> [!NOTE]
+> No release has been published for this repo yet, so there's no prebuilt
+> binary and no published Docker image. Build from source (below) is the
+> only path that works today.
 
-### One-line install (prebuilt binary)
-
-```bash
-curl -sSL https://www.intellirecon.com/install | bash
-```
-
-Downloads the latest release binary for your platform (Linux `amd64`/`arm64`) and installs it to `/usr/local/bin` (or `~/.local/bin` without sudo). Override with `INTELLIRECON_INSTALL_DIR` or pin a version with `INTELLIRECON_VERSION=vX.Y.Z`.
-
-### Docker
+### Docker (built locally)
 
 ```bash
+git clone https://github.com/dokotela021/intellirecon-console.git
+cd intellirecon-console/scanner
+docker build -t intellirecon .
 docker run --rm -p 9137:9137 \
   -e INTELLIRECON_LLM=minimax/MiniMax-M3 \
   -e INTELLIRECON_API_KEY=your_provider_api_key \
   -v intellirecon-data:/data \
-  ghcr.io/intellirecon/intellirecon:latest
+  intellirecon
 ```
 
 The image is **batteries-included**: an extensive offensive-security toolset is preinstalled (nmap, nuclei, httpx, subfinder, dnsx, naabu, katana, ffuf, gobuster, dalfox, feroxbuster, sqlmap, masscan, nikto, whatweb, hydra, and more), plus Chromium for browser-assisted DAST. It also keeps the full package-manager set (apt, go, cargo, pipx, npm) available, so the agent auto-installs anything missing at runtime. Scan data persists to the `/data` volume, and the server binds `0.0.0.0` inside the container — set `INTELLIRECON_USERNAME`/`INTELLIRECON_PASSWORD` before exposing it beyond localhost.
 
-The container runs as root by design (the engine only enables runtime auto-install for uid 0, and apt/go/cargo installs need system write access). Treat it as a disposable, network-isolated scanning sandbox. It's published for `amd64`; use the one-line installer for arm64 hosts.
+The container runs as root by design (the engine only enables runtime auto-install for uid 0, and apt/go/cargo installs need system write access). Treat it as a disposable, network-isolated scanning sandbox.
 
-On first run, if you don't set dashboard auth the container **generates a random admin password and prints it to the logs** (the image binds `0.0.0.0`, which the engine won't do without auth). Set `INTELLIRECON_USERNAME` + `INTELLIRECON_PASSWORD` (or `INTELLIRECON_PASSWORD_HASH`) to use your own. The binary never self-updates inside the container (`INTELLIRECON_NO_AUTO_UPDATE=1`) — pull a new image tag to upgrade.
+On first run, if you don't set dashboard auth the container **generates a random admin password and prints it to the logs** (the image binds `0.0.0.0`, which the engine won't do without auth). Set `INTELLIRECON_USERNAME` + `INTELLIRECON_PASSWORD` (or `INTELLIRECON_PASSWORD_HASH`) to use your own. The binary never self-updates inside the container (`INTELLIRECON_NO_AUTO_UPDATE=1`) — rebuild the image to upgrade.
 
 ### Requirements (build from source)
 
@@ -241,19 +203,15 @@ go version
 ### Build From Source
 
 ```bash
-git clone https://github.com/intellirecon/intellirecon.git
-cd intellirecon
+git clone https://github.com/dokotela021/intellirecon-console.git
+cd intellirecon-console/scanner
 make build
 sudo install -m 755 build/intellirecon /usr/local/bin/intellirecon
 ```
 
 `make build` builds the React Web UI into `internal/web/static`, then builds the Go binary.
 
-### Install With Go
-
-```bash
-GOPROXY=direct GOSUMDB=off go install github.com/intellirecon/intellirecon/v4/cmd/intellirecon@latest
-```
+To update later, `git pull` and re-run `make build`. (`go install` isn't available for this module — it isn't published under a fetchable module path.)
 
 ## Configuration
 
@@ -745,7 +703,5 @@ No license file is currently included in this directory.
 
 | Resource      | Link                                                                             |
 | ------------- | -------------------------------------------------------------------------------- |
-| Hosted (Cloud) | [www.intellirecon.com](https://www.intellirecon.com/)                                   |
-| Documentation | [docs.intellirecon.com](https://docs.intellirecon.com)                                   |
-| Issues        | [github.com/intellirecon/intellirecon/issues](https://github.com/intellirecon/intellirecon/issues) |
-| Support       | [buymeacoffee.com/intellirecon](https://buymeacoffee.com/intellirecon)                     |
+| Source        | [github.com/dokotela021/intellirecon-console](https://github.com/dokotela021/intellirecon-console) |
+| Issues        | [github.com/dokotela021/intellirecon-console/issues](https://github.com/dokotela021/intellirecon-console/issues) |

@@ -2,10 +2,9 @@
 
 ## Reporting a vulnerability
 
-Please email security@intellirecon.com with details. We acknowledge reports
-within two business days and aim to ship a fix or mitigation on a
-severity-driven schedule. Do not file public GitHub issues for
-suspected vulnerabilities.
+Please report it privately via [GitHub Security Advisories](https://github.com/dokotela021/intellirecon-console/security/advisories/new)
+for this repository. Do not file public GitHub issues for suspected
+vulnerabilities.
 
 ## Daily scan policy
 

@@ -66,7 +66,7 @@ All variables can also be placed in `~/.intellirecon.env`.
 ## Adding Proxy Support to New Code
 
 ```go
-import "github.com/intellirecon/intellirecon/v4/internal/proxy"
+import "intellirecon-scanner/internal/proxy"
 
 // Get a client for the next proxy in the rotation
 client, err := proxy.GetClient()
