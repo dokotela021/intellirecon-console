@@ -46,6 +46,10 @@ const FALLBACK_MODELS = (process.env.ANTHROPIC_FALLBACK_MODELS || "")
   .filter(Boolean)
   .slice(0, 3)
   .map((model) => ({ model }));
+// Selectable in the UI's model dropdown — whatever's configured, nothing extra to curate.
+const MODEL_OPTIONS = [MODEL, ...FALLBACK_MODELS.map((f) => f.model)].filter(
+  (m, i, arr) => arr.indexOf(m) === i,
+);
 const MAX_ROUNDS = 40; // safety cap on the agentic tool loop per user turn
 // MCP tool calls (recon scans) routinely outlast the SDK's 60s default request
 // timeout. Give them a generous ceiling, overridable via env.
@@ -171,7 +175,8 @@ function refreshAgentClients() {
     send(ws, {
       type: "ready",
       tools: toolInfoForClient(),
-      model: MODEL,
+      model: ws.session?.model || MODEL,
+      models: MODEL_OPTIONS,
       hasKey: HAS_KEY,
       modes: modesForClient(),
       mode: ws.session?.mode || DEFAULT_MODE,
@@ -969,6 +974,9 @@ async function runAgentTurn(ws, session, userText) {
   const mode = getMode(session.mode);
   const tools = anthropicToolList(mode);
   const system = mode.briefing ? `${SYSTEM_PROMPT}\n\n---\n\n${mode.briefing}` : SYSTEM_PROMPT;
+  const activeModel = session.model || MODEL;
+  // Never offer the operator's chosen model back to itself as a "fallback".
+  const activeFallbacks = FALLBACK_MODELS.filter((f) => f.model !== activeModel);
 
   // Accumulates this turn's tool output + findings, mirrored to disk (see
   // finalizeRun) so the terminal-side Claude Code can continue from the results.
@@ -993,17 +1001,17 @@ async function runAgentTurn(ws, session, userText) {
     let final;
     try {
       const stream = anthropic.messages.stream({
-        model: MODEL,
+        model: activeModel,
         max_tokens: 16000,
         system,
         messages: session.messages,
         tools,
-        ...(OPENROUTER_MODE && FALLBACK_MODELS.length ? { fallbacks: FALLBACK_MODELS } : {}),
+        ...(OPENROUTER_MODE && activeFallbacks.length ? { fallbacks: activeFallbacks } : {}),
       });
       stream.on("text", (t) => send(ws, { type: "assistant_delta", text: t }));
       final = await stream.finalMessage();
-      if (final.model && final.model !== MODEL) {
-        console.log(`[intellirecon] fallback served this turn: ${MODEL} -> ${final.model}`);
+      if (final.model && final.model !== activeModel) {
+        console.log(`[intellirecon] fallback served this turn: ${activeModel} -> ${final.model}`);
       }
     } catch (e) {
       send(ws, { type: "error", message: `Model error: ${e.message}` });
@@ -1231,12 +1239,13 @@ ptyWss.on("connection", (ws, req) => {
 });
 
 agentWss.on("connection", (ws) => {
-  const session = { messages: [], aborted: false, inflight: new Map(), mode: DEFAULT_MODE };
-  ws.session = session; // so refreshAgentClients() can report this connection's current mode
+  const session = { messages: [], aborted: false, inflight: new Map(), mode: DEFAULT_MODE, model: MODEL };
+  ws.session = session; // so refreshAgentClients() can report this connection's current mode/model
   send(ws, {
     type: "ready",
     tools: toolInfoForClient(),
-    model: MODEL,
+    model: session.model,
+    models: MODEL_OPTIONS,
     hasKey: HAS_KEY,
     modes: modesForClient(),
     mode: session.mode,
@@ -1266,6 +1275,14 @@ agentWss.on("connection", (ws) => {
       if (mode) {
         session.mode = mode.id;
         send(ws, { type: "mode_set", mode: mode.id });
+      }
+      return;
+    }
+    if (msg.type === "set_model") {
+      const model = String(msg.model || "");
+      if (MODEL_OPTIONS.includes(model)) {
+        session.model = model;
+        send(ws, { type: "model_set", model });
       }
       return;
     }

@@ -47,8 +47,17 @@ export interface AgentMode {
 
 // server -> client on the /agent socket
 export type AgentServerMsg =
-  | { type: "ready"; tools: ToolInfo[]; model: string; hasKey: boolean; modes: AgentMode[]; mode: string }
+  | {
+      type: "ready";
+      tools: ToolInfo[];
+      model: string;
+      models: string[];
+      hasKey: boolean;
+      modes: AgentMode[];
+      mode: string;
+    }
   | { type: "mode_set"; mode: string }
+  | { type: "model_set"; model: string }
   | { type: "status"; state: "idle" | "thinking" | "running"; label?: string }
   | { type: "assistant_delta"; text: string }
   | { type: "assistant_done" }
@@ -62,7 +71,8 @@ export type AgentClientMsg =
   | { type: "user"; text: string }
   | { type: "stop" }
   | { type: "stop_tool"; id: string }
-  | { type: "set_mode"; mode: string };
+  | { type: "set_mode"; mode: string }
+  | { type: "set_model"; model: string };
 
 // --- Knowledge base (GET /api/kb?target=...) --------------------------------
 

@@ -10,6 +10,14 @@ const SUGGESTIONS = [
   "Run a nuclei scan against http://testphp.vulnweb.com and triage findings",
 ];
 
+// Model slugs are "provider/name:variant" and can run 40+ chars (e.g.
+// "nvidia/nemotron-3-ultra-550b-a55b:free") — too long for a header dropdown.
+// Drop the provider prefix and surface free/paid as a short suffix instead.
+function modelLabel(model: string) {
+  const name = model.includes("/") ? model.split("/").slice(1).join("/") : model;
+  return name.endsWith(":free") ? `${name.slice(0, -":free".length)} · free` : `${name} · paid`;
+}
+
 export function AgentChat() {
   const messages = useAgent((s) => s.messages);
   const status = useAgent((s) => s.status);
@@ -19,6 +27,9 @@ export function AgentChat() {
   const modes = useAgent((s) => s.modes);
   const mode = useAgent((s) => s.mode);
   const setMode = useAgent((s) => s.setMode);
+  const models = useAgent((s) => s.models);
+  const model = useAgent((s) => s.model);
+  const setModel = useAgent((s) => s.setModel);
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const activeMode = modes.find((m) => m.id === mode);
@@ -48,6 +59,20 @@ export function AgentChat() {
             {modes.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
+              </option>
+            ))}
+          </select>
+        )}
+        {models.length > 1 && (
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            title={model}
+            className="max-w-[10.5rem] truncate rounded-md border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground outline-none focus:border-ring"
+          >
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {modelLabel(m)}
               </option>
             ))}
           </select>

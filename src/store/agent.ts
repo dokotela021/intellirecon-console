@@ -16,6 +16,7 @@ interface AgentStore {
   status: "idle" | "thinking" | "running";
   statusLabel?: string;
   model: string;
+  models: string[];
   hasKey: boolean;
   tools: ToolInfo[];
   modes: AgentMode[];
@@ -28,6 +29,7 @@ interface AgentStore {
   loadFindings: () => void;
   send: (text: string) => void;
   setMode: (mode: string) => void;
+  setModel: (model: string) => void;
   stop: () => void;
   stopTool: (id: string) => void;
   removeToolEvent: (id: string) => void;
@@ -51,6 +53,7 @@ export const useAgent = create<AgentStore>((set, get) => ({
   conn: "closed",
   status: "idle",
   model: "",
+  models: [],
   hasKey: false,
   tools: [],
   modes: [],
@@ -91,10 +94,20 @@ export const useAgent = create<AgentStore>((set, get) => ({
       }
       switch (msg.type) {
         case "ready":
-          set({ tools: msg.tools, model: msg.model, hasKey: msg.hasKey, modes: msg.modes, mode: msg.mode });
+          set({
+            tools: msg.tools,
+            model: msg.model,
+            models: msg.models,
+            hasKey: msg.hasKey,
+            modes: msg.modes,
+            mode: msg.mode,
+          });
           break;
         case "mode_set":
           set({ mode: msg.mode });
+          break;
+        case "model_set":
+          set({ model: msg.model });
           break;
         case "status":
           set({ status: msg.state, statusLabel: msg.label });
@@ -176,6 +189,13 @@ export const useAgent = create<AgentStore>((set, get) => ({
   setMode: (mode: string) => {
     set({ mode });
     socket?.send(JSON.stringify({ type: "set_mode", mode }));
+  },
+
+  // Optimistic for the same reason as setMode — the dropdown only ever offers
+  // values from the server's own `models` list, so this can't select bad state.
+  setModel: (model: string) => {
+    set({ model });
+    socket?.send(JSON.stringify({ type: "set_model", model }));
   },
 
   stop: () => socket?.send(JSON.stringify({ type: "stop" })),
