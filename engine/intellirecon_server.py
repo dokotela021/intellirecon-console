@@ -6932,7 +6932,14 @@ class EnhancedCommandExecutor:
                 if now > deadline:
                     gave_up_reason = f"exceeded {self.timeout}s absolute limit"
                     break
-                time.sleep(1)
+                # 100ms, not 1s: the first poll() happens right after Popen()
+                # returns, almost always before the child has even run, so a
+                # coarser interval put an artificial floor under EVERY
+                # command's duration — a `which x` that finishes in a few ms
+                # was taking a full second, and boot alone runs a couple
+                # hundred of these checks. Negligible cost against a 180s
+                # stall threshold either way.
+                time.sleep(0.1)
 
             if gave_up_reason is None:
                 self.end_time = time.time()
