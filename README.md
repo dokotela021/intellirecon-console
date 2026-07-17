@@ -53,6 +53,11 @@ cd intellirecon
 npm install                      # builds node-pty natively (needs gcc/make)
 export ANTHROPIC_API_KEY=sk-ant-...   # required for the agent
 
+# One-time: set up the engine's Python venv — npm run dev spawns this directly,
+# so it must exist first (see engine/README.md for the security-tool installs it wraps):
+cd engine && python3 -m venv intellirecon-env && \
+  intellirecon-env/bin/pip install -r requirements.txt && cd ..
+
 # Development (Vite on :5173, backend on :8899, engine API on :8888, hot reload):
 npm run dev
 #   → open http://localhost:5173
@@ -60,9 +65,12 @@ npm run dev
 # Or a single production process (backend serves the built UI on :8899):
 npm run serve
 #   → open http://localhost:8899
+#   (npm run serve does NOT start the engine API — run it separately, see Configuration below)
 ```
 
 If `ANTHROPIC_API_KEY` is unset, the terminal and UI still work; the agent panel shows a banner until you set it and restart.
+
+`npm run dev` runs its three processes with `concurrently -k`, meaning **if the engine venv is missing, the whole command exits immediately** — Vite and the backend get killed too, not just the engine. Run the one-time setup above before your first `npm run dev`.
 
 ## Using it
 
