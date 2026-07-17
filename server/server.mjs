@@ -34,6 +34,18 @@ const PORT = Number(process.env.PORT || 8899);
 // and ANTHROPIC_MODEL instead of ANTHROPIC_API_KEY. See .env / .env.example.
 const MODEL = process.env.INTELLIRECON_MODEL || process.env.ANTHROPIC_MODEL || "claude-opus-4-8";
 const HAS_KEY = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+// OpenRouter-only: when the primary model errors (throttled, down, moderation-flagged),
+// OpenRouter's `fallbacks` param transparently retries the same request against the next
+// model in this list — the operator's turn never sees the error. Free OpenRouter models
+// share one account-wide quota, so a free->free chain doesn't help; put a paid model here.
+// Capped at 3 entries — OpenRouter rejects more.
+const OPENROUTER_MODE = /openrouter\.ai/i.test(process.env.ANTHROPIC_BASE_URL || "");
+const FALLBACK_MODELS = (process.env.ANTHROPIC_FALLBACK_MODELS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .slice(0, 3)
+  .map((model) => ({ model }));
 const MAX_ROUNDS = 40; // safety cap on the agentic tool loop per user turn
 // MCP tool calls (recon scans) routinely outlast the SDK's 60s default request
 // timeout. Give them a generous ceiling, overridable via env.
@@ -986,9 +998,13 @@ async function runAgentTurn(ws, session, userText) {
         system,
         messages: session.messages,
         tools,
+        ...(OPENROUTER_MODE && FALLBACK_MODELS.length ? { fallbacks: FALLBACK_MODELS } : {}),
       });
       stream.on("text", (t) => send(ws, { type: "assistant_delta", text: t }));
       final = await stream.finalMessage();
+      if (final.model && final.model !== MODEL) {
+        console.log(`[intellirecon] fallback served this turn: ${MODEL} -> ${final.model}`);
+      }
     } catch (e) {
       send(ws, { type: "error", message: `Model error: ${e.message}` });
       break;
