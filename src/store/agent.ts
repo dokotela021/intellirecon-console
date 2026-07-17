@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { wsUrl } from "@/lib/utils";
+import { splitSuggestion, wsUrl } from "@/lib/utils";
 import type {
   AgentMode,
   AgentServerMsg,
@@ -24,12 +24,18 @@ interface AgentStore {
   messages: ChatMessage[];
   toolEvents: ToolEvent[];
   findings: Finding[];
+  // The agent's suggested next input (see NEXT_INPUT convention in
+  // server.mjs's SYSTEM_PROMPT), stripped out of the last assistant message
+  // once its turn ends. Consumed (cleared) by the chat input once it's used
+  // to pre-fill the box, so it doesn't re-fire on unrelated re-renders.
+  pendingSuggestion: string | null;
   connect: () => void;
   disconnect: () => void;
   loadFindings: () => void;
   send: (text: string) => void;
   setMode: (mode: string) => void;
   setModel: (model: string) => void;
+  consumeSuggestion: () => void;
   stop: () => void;
   stopTool: (id: string) => void;
   removeToolEvent: (id: string) => void;
@@ -61,6 +67,7 @@ export const useAgent = create<AgentStore>((set, get) => ({
   messages: [],
   toolEvents: [],
   findings: [],
+  pendingSuggestion: null,
 
   loadFindings: () => {
     fetch("/api/findings")
@@ -109,9 +116,24 @@ export const useAgent = create<AgentStore>((set, get) => ({
         case "model_set":
           set({ model: msg.model });
           break;
-        case "status":
+        case "status": {
           set({ status: msg.state, statusLabel: msg.label });
+          // The turn is fully over — check the last thing the agent said for a
+          // trailing NEXT_INPUT suggestion (see SYSTEM_PROMPT in server.mjs)
+          // and split it out so the chat bubble doesn't display the raw marker.
+          if (msg.state === "idle") {
+            const msgs = get().messages.slice();
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant" && !last.streaming) {
+              const { display, suggestion } = splitSuggestion(last.text);
+              if (suggestion) {
+                msgs[msgs.length - 1] = { ...last, text: display };
+                set({ messages: msgs, pendingSuggestion: suggestion });
+              }
+            }
+          }
           break;
+        }
         case "assistant_delta": {
           const msgs = get().messages.slice();
           const last = msgs[msgs.length - 1];
@@ -197,6 +219,8 @@ export const useAgent = create<AgentStore>((set, get) => ({
     set({ model });
     socket?.send(JSON.stringify({ type: "set_model", model }));
   },
+
+  consumeSuggestion: () => set({ pendingSuggestion: null }),
 
   stop: () => socket?.send(JSON.stringify({ type: "stop" })),
 

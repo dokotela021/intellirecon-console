@@ -960,7 +960,8 @@ Operating principles:
 - Long enumerations (amass, deep recon, brute-forcers) can legitimately take many minutes. That is expected — do not abandon or duplicate a scan just because it is slow; let it finish and work on other independent tasks meanwhile. If a tool reports it exceeded its time limit, narrow its scope rather than replaying the same heavy call.
 - When you confirm something real with evidence, call report_finding. Do not report guesses.
 - Be concise in chat: say what you're doing and what you found, not a wall of raw output (the operator sees the terminal and tool feed already).
-- Lead with the outcome. When a task is done, summarize what you found and the suggested next step.`;
+- Lead with the outcome. When a task is done, summarize what you found and the suggested next step.
+- When you're handing control back to the operator (i.e. this is your final message of the turn, not followed by more tool calls) and there's a clear, concrete next action, end your reply with one line in exactly this form, nothing after it: \`NEXT_INPUT: <the next action, phrased as an instruction to you>\`. The UI pre-fills the operator's input box with it so they can just press Enter to continue, or type over it — so phrase it as something that reads naturally typed by the operator (e.g. \`NEXT_INPUT: run a nuclei scan against the live hosts\`), not a question, not addressed to them, not wrapped in quotes. Omit this line entirely when there's no obvious single next step — a genuine question to the operator, an ambiguous fork, or a fully finished objective.`;
 
 function send(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj));

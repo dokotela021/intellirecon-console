@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Send, Sparkles, Bot, User, Trash2 } from "lucide-react";
 import { useAgent } from "@/store/agent";
 import { cn } from "@/lib/utils";
@@ -30,18 +30,53 @@ export function AgentChat() {
   const models = useAgent((s) => s.models);
   const model = useAgent((s) => s.model);
   const setModel = useAgent((s) => s.setModel);
+  const pendingSuggestion = useAgent((s) => s.pendingSuggestion);
+  const consumeSuggestion = useAgent((s) => s.consumeSuggestion);
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeMode = modes.find((m) => m.id === mode);
+
+  // Shell-style Up/Down recall over this session's sent messages. A ref (not
+  // state) because OS key-repeat can fire several keydowns before React
+  // commits a re-render — a state-based index would read stale on the 2nd+
+  // keypress in that burst and get stuck re-recalling the same entry.
+  // `null` means "not currently navigating" (live draft); `draftRef` holds
+  // what was being typed before the first Up press, restored once Down
+  // arrows past the newest entry.
+  const history = useMemo(() => messages.filter((m) => m.role === "user").map((m) => m.text), [messages]);
+  const historyIdxRef = useRef<number | null>(null);
+  const draftRef = useRef("");
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
+  // The agent's recommended next input lands here pre-filled and pre-selected
+  // — Enter sends it as-is, or typing anything replaces it outright — rather
+  // than auto-sending on the operator's behalf. Never stomps a draft the
+  // operator already started typing while the agent was working.
+  useEffect(() => {
+    if (!pendingSuggestion) return;
+    consumeSuggestion();
+    if (input.trim()) return;
+    setInput(pendingSuggestion);
+    historyIdxRef.current = null;
+    requestAnimationFrame(() => textareaRef.current?.select());
+    // input deliberately excluded — this should only re-check on a new
+    // suggestion, not on every keystroke of an unrelated draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingSuggestion, consumeSuggestion]);
+
   const submit = () => {
-    if (!input.trim()) return;
+    // Mirrors the send button's disabled condition — without this, Enter
+    // (unlike the button) had no guard, so it could fire a second turn on
+    // the same session before the first's finished. The backend has no
+    // per-session queue, so overlapping turns interleave their output.
+    if (!input.trim() || status !== "idle") return;
     send(input);
     setInput("");
+    historyIdxRef.current = null;
   };
 
   return (
@@ -157,12 +192,43 @@ export function AgentChat() {
         )}
         <div className="flex items-end gap-2">
           <textarea
+            ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              historyIdxRef.current = null;
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 submit();
+                return;
+              }
+              // Once already browsing history, further Up/Down keeps browsing
+              // regardless of cursor position (setting a controlled input's
+              // value moves the caret to its end, so re-checking "at the
+              // boundary" here would itself be racing that same DOM update).
+              // The boundary check only gates the *first* Up/Down — so it
+              // doesn't hijack normal cursor movement while just typing.
+              const inHistory = historyIdxRef.current !== null;
+              const el = e.currentTarget;
+              const atStart = el.selectionStart === 0 && el.selectionEnd === 0;
+              if (e.key === "ArrowUp" && (inHistory || atStart) && history.length > 0) {
+                e.preventDefault();
+                if (!inHistory) draftRef.current = el.value;
+                const next = inHistory ? Math.max(0, historyIdxRef.current! - 1) : history.length - 1;
+                historyIdxRef.current = next;
+                setInput(history[next]);
+              } else if (e.key === "ArrowDown" && inHistory) {
+                e.preventDefault();
+                const next = historyIdxRef.current! + 1;
+                if (next >= history.length) {
+                  historyIdxRef.current = null;
+                  setInput(draftRef.current);
+                } else {
+                  historyIdxRef.current = next;
+                  setInput(history[next]);
+                }
               }
             }}
             rows={1}
