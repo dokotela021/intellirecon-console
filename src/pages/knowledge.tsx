@@ -3,6 +3,7 @@ import { BrainCircuit, FileCode2, Network, Users, KeyRound, Workflow, Link2, Eye
 import type { KnowledgeBase } from "@/types";
 import { shortTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { Markdown } from "@/components/markdown";
 
 const EMPTY_KB: KnowledgeBase = {
   target: "",
@@ -369,7 +370,7 @@ export function KnowledgePage() {
                       {n.agent && <span className="text-[10px] text-muted-foreground mono">{n.agent}</span>}
                       <span className="ml-auto text-[10px] text-muted-foreground mono">{shortTime(n.at)}</span>
                     </div>
-                    <p className="mt-1 whitespace-pre-wrap text-xs text-foreground/90">{n.body}</p>
+                    <Markdown text={n.body} className="mt-1 text-xs" />
                   </div>
                 ))}
               </div>

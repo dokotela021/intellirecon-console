@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Send, Sparkles, Bot, User, Trash2 } from "lucide-react";
 import { useAgent } from "@/store/agent";
 import { cn } from "@/lib/utils";
+import { Markdown } from "@/components/markdown";
 
 const SUGGESTIONS = [
   "Recon scanme.nmap.org — start with an nmap service scan",
@@ -110,8 +111,12 @@ export function AgentChat() {
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground mono">
                 {m.role === "user" ? "you" : "agent"}
               </div>
-              <div className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90">
-                {m.text}
+              <div className="mt-0.5 break-words">
+                {m.role === "user" ? (
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">{m.text}</p>
+                ) : (
+                  <Markdown text={m.text} />
+                )}
                 {m.streaming && <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-recon align-middle" />}
               </div>
             </div>
