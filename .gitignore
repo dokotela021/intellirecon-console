@@ -14,6 +14,9 @@ __pycache__/
 *.pyc
 engine/intellirecon-env/
 
+# llm-bridge/ (Python)
+llm-bridge/venv/
+
 # scanner/ (Go)
 scanner/webui/node_modules/
 scanner/webui/dist/

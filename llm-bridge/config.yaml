@@ -1,0 +1,26 @@
+model_list:
+  - model_name: intellirecon-primary
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: intellirecon-fallback-1
+    litellm_params:
+      model: groq/llama-3.1-8b-instant
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: intellirecon-fallback-2
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: intellirecon-fallback-3
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.3-70b-instruct:free
+      api_key: os.environ/OPENROUTER_API_KEY
+
+# Both Groq entries avoid Groq's reasoning-capable models (gpt-oss, qwen3) —
+# their thinking_blocks can't be replayed back on a later turn (see
+# llm-bridge/README.md). Plain instruct models sidestep that entirely.
+litellm_settings:
+  fallbacks: [{"intellirecon-primary": ["intellirecon-fallback-1", "intellirecon-fallback-2", "intellirecon-fallback-3"]}]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

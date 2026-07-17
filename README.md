@@ -27,7 +27,7 @@ This isn't a side-by-side bundle of three separate tools — the merge is the po
 - **One agent, both tool surfaces.** A single Claude-driven loop plans across the engine's 150+ security tools *and* the shared shell in the same turn, instead of switching contexts between a scanner CLI and a separate tool runner.
 - **Terminal handoff.** Every run writes a `HANDOFF.md` + structured `run.json` under `intellirecon-runs/`, so a `claude` (Claude Code) session started in the embedded terminal picks up exactly where the agent left off — same cwd, same findings, no re-explaining the target.
 - **Durable cross-session knowledge base.** Findings, endpoints, roles, and auth notes persist per-target in SQLite (`server/db.mjs`) and are queryable by any of the 9 recon-lens modes, rather than each tool run starting cold.
-- **Two swappable LLM backends.** Point `ANTHROPIC_API_KEY` at Anthropic directly, or `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` at OpenRouter (or any Anthropic-compatible gateway) — same agent loop, no code changes.
+- **Swappable LLM backends.** Point `ANTHROPIC_API_KEY` at Anthropic directly, or `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` at OpenRouter (or any Anthropic-compatible gateway) — same agent loop, no code changes. `llm-bridge/` goes one step further: a local LiteLLM proxy that exposes an Anthropic-compatible endpoint backed by providers that don't natively speak that format (Groq, in the shipped config) — see `llm-bridge/README.md`.
 - **One consistent UI.** Console, terminal, findings, knowledge base, and tool activity all live in a single design system instead of three tools with three different look-and-feels glued together.
 
 Everything intelligent runs in the browser + Claude. The backend is a **single file** (`server/server.mjs`) that only does the two things a browser physically can't: spawn a shell and hold an API key.
@@ -58,7 +58,12 @@ export ANTHROPIC_API_KEY=sk-ant-...   # required for the agent
 cd engine && python3 -m venv intellirecon-env && \
   intellirecon-env/bin/pip install -r requirements.txt && cd ..
 
-# Development (Vite on :5173, backend on :8899, engine API on :8888, hot reload):
+# One-time: same story for the LLM bridge (see llm-bridge/README.md):
+cd llm-bridge && python3 -m venv venv && \
+  venv/bin/pip install -r requirements.txt && cd ..
+
+# Development (Vite on :5173, backend on :8899, engine API on :8888, LLM bridge
+# on :8471, hot reload):
 npm run dev
 #   → open http://localhost:5173
 
@@ -70,7 +75,7 @@ npm run serve
 
 If `ANTHROPIC_API_KEY` is unset, the terminal and UI still work; the agent panel shows a banner until you set it and restart.
 
-`npm run dev` runs its three processes with `concurrently -k`, meaning **if the engine venv is missing, the whole command exits immediately** — Vite and the backend get killed too, not just the engine. Run the one-time setup above before your first `npm run dev`.
+`npm run dev` runs its four processes with `concurrently -k`, meaning **if either the engine venv or the LLM bridge venv is missing, the whole command exits immediately** — Vite and the backend get killed too, not just the one that failed to spawn. Run the one-time setup above before your first `npm run dev`.
 
 ## Using it
 
@@ -108,6 +113,7 @@ Browse it on the **Knowledge Base** page (per-target, tabbed by category), or vi
 ## Configuration
 
 - **Model** — defaults to `claude-opus-4-8`. Override with `INTELLIRECON_MODEL` (e.g. `claude-sonnet-5` for faster/cheaper loops).
+- **LLM bridge (`llm-bridge/`)** — the shipped `.env` points `ANTHROPIC_BASE_URL` at a local LiteLLM proxy (started automatically by `npm run dev`) rather than OpenRouter directly, so the agent's primary model is Groq (a genuinely separate free-tier quota from OpenRouter's) with automatic fallback through more Groq models and then OpenRouter. See `llm-bridge/README.md` for why, and for a real failure mode worth knowing about (Groq's reasoning models can't have their `thinking` blocks replayed on a later turn — already avoided in the shipped config, but relevant if you change the model). `.env` also documents how to go back to OpenRouter directly, or Anthropic directly.
 - **Model fallback (OpenRouter only)** — `ANTHROPIC_FALLBACK_MODELS`, a comma-separated list of up to 3 model slugs. When the primary model errors (throttled, down, moderation-flagged), OpenRouter transparently retries the same request on the next model in the list before the error ever reaches chat — every entry (plus the primary) also shows up in the UI's model dropdown so the operator can pick one manually. Free OpenRouter models share one account-wide 16-req/min quota, so chaining free → free dodges a single model/provider's own outage but not a shared rate limit — put a paid model last as the real safety net, e.g. `ANTHROPIC_FALLBACK_MODELS=meta-llama/llama-3.3-70b-instruct:free,qwen/qwen3-coder:free,deepseek/deepseek-chat-v3.1` (two free models on different providers, then a paid model that isn't rationed at all). When a fallback actually serves a turn, the backend logs `fallback served this turn: <primary> -> <served>`. A paid entry only helps while its OpenRouter account has a balance — at $0 it 402s instead of rescuing anything, same as any other error (check [openrouter.ai/settings/credits](https://openrouter.ai/settings/credits)).
 - **MCP servers** — edit `mcp.config.json`. Each entry is spawned over stdio; failures are non-fatal. The bundled engine's 150+ tools need its API server (`engine/intellirecon_server.py`) running on `:8888` — `npm run dev` starts it automatically alongside `web`/`api`. To run it standalone: `./engine/intellirecon-env/bin/python engine/intellirecon_server.py`.
 - **MCP call timeout** — global default `INTELLIRECON_MCP_TIMEOUT_MS` (`300000`, i.e. 5 min), overriding the MCP SDK's 60 s default. Set **per-tool** ceilings under each server's `toolTimeouts` in `mcp.config.json` (values in **seconds**; `default` covers the whole server, named entries override it) — long enumerators like `amass_scan` need far more (the shipped config gives it 30 min). A ceiling is a cap, not a wait: a tool returns the instant it finishes, so generous limits are cheap, and the operator can hit **Stop** to cancel a call early. If a call still hits its ceiling, the scan may keep running on the MCP server — the agent is told to narrow scope rather than replay the same heavyweight call.
