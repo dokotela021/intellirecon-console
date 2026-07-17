@@ -53,7 +53,7 @@ cd intellirecon
 npm install                      # builds node-pty natively (needs gcc/make)
 export ANTHROPIC_API_KEY=sk-ant-...   # required for the agent
 
-# Development (Vite on :5173, backend on :8899, hot reload):
+# Development (Vite on :5173, backend on :8899, engine API on :8888, hot reload):
 npm run dev
 #   → open http://localhost:5173
 
@@ -100,19 +100,7 @@ Browse it on the **Knowledge Base** page (per-target, tabbed by category), or vi
 ## Configuration
 
 - **Model** — defaults to `claude-opus-4-8`. Override with `INTELLIRECON_MODEL` (e.g. `claude-sonnet-5` for faster/cheaper loops).
-- **MCP servers** — edit `mcp.config.json`. Each entry is spawned over stdio; failures are non-fatal. To wire in the bundled engine's tools, start its API server (`engine/intellirecon_server.py`), then flip `enabled: true`:
-
-  ```jsonc
-  {
-    "mcpServers": {
-      "engine": {
-        "enabled": true,
-        "command": "./engine/intellirecon-env/bin/python",
-        "args": ["./engine/intellirecon_mcp.py", "--server", "http://127.0.0.1:8888"]
-      }
-    }
-  }
-  ```
+- **MCP servers** — edit `mcp.config.json`. Each entry is spawned over stdio; failures are non-fatal. The bundled engine's 150+ tools need its API server (`engine/intellirecon_server.py`) running on `:8888` — `npm run dev` starts it automatically alongside `web`/`api`. To run it standalone: `./engine/intellirecon-env/bin/python engine/intellirecon_server.py`.
 - **MCP call timeout** — global default `INTELLIRECON_MCP_TIMEOUT_MS` (`300000`, i.e. 5 min), overriding the MCP SDK's 60 s default. Set **per-tool** ceilings under each server's `toolTimeouts` in `mcp.config.json` (values in **seconds**; `default` covers the whole server, named entries override it) — long enumerators like `amass_scan` need far more (the shipped config gives it 30 min). A ceiling is a cap, not a wait: a tool returns the instant it finishes, so generous limits are cheap, and the operator can hit **Stop** to cancel a call early. If a call still hits its ceiling, the scan may keep running on the MCP server — the agent is told to narrow scope rather than replay the same heavyweight call.
 - **Port** — `PORT` (default `8899`). **Shell** — `SHELL`. **Start dir** — `INTELLIRECON_CWD`.
 

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "IntelliRecon — browser-native AI recon console. In-browser terminal + Claude agent driving MCP security tools. Thin backend.",
   "scripts": {
-    "dev": "concurrently -k -n web,api -c cyan,magenta \"vite\" \"node --env-file-if-exists=.env server/server.mjs\"",
+    "dev": "concurrently -k -n web,api,engine -c cyan,magenta,yellow \"vite\" \"node --env-file-if-exists=.env server/server.mjs\" \"./engine/intellirecon-env/bin/python engine/intellirecon_server.py\"",
     "build": "vite build",
     "start": "node --env-file-if-exists=.env server/server.mjs",
     "serve": "npm run build && node --env-file-if-exists=.env server/server.mjs"
