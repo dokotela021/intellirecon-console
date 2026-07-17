@@ -54,6 +54,23 @@ function Row({ ev }: { ev: ToolEvent }) {
           <X className="h-3 w-3" />
         </button>
       </div>
+      {running && ev.progressMessage && (
+        <div className="px-3 pb-2 pl-8">
+          <div className="h-1 overflow-hidden rounded-full bg-secondary">
+            {ev.progress ? (
+              <div
+                className="h-full rounded-full bg-cyan transition-[width] duration-500"
+                style={{ width: `${Math.min(100, (ev.progress / (ev.progressTotal || 100)) * 100)}%` }}
+              />
+            ) : (
+              // No real percentage yet (heartbeat-only) — an indeterminate
+              // sliver so "still running" reads differently from 0% stuck.
+              <div className="h-full w-1/4 animate-pulse rounded-full bg-cyan/50" />
+            )}
+          </div>
+          <div className="mt-1 truncate text-[10px] text-muted-foreground mono">{ev.progressMessage}</div>
+        </div>
+      )}
       {open && (
         <div className="space-y-2 px-3 pb-3 pl-8">
           <div>

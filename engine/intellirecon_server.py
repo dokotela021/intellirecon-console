@@ -6662,6 +6662,10 @@ def setup_logging():
 # Configuration (using existing API_PORT from top of file)
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "0").lower() in ("1", "true", "yes", "y")
 COMMAND_TIMEOUT = int(os.environ.get("INTELLIRECON_COMMAND_TIMEOUT", "1800"))  # default 30 min; long recon/enum tools need more than 5 min
+# CommandExecutor.execute() only enforces COMMAND_TIMEOUT as an absolute
+# backstop now — a command producing no new stdout/stderr for this long is
+# what actually ends it early ("stopped moving", not "been running a while").
+STALL_TIMEOUT = int(os.environ.get("INTELLIRECON_STALL_TIMEOUT", "180"))
 CACHE_SIZE = 1000
 CACHE_TTL = 3600  # 1 hour
 
@@ -6901,9 +6905,36 @@ class EnhancedCommandExecutor:
             progress_thread.daemon = True
             progress_thread.start()
 
-            # Wait for the process to complete or timeout
-            try:
-                self.return_code = self.process.wait(timeout=self.timeout)
+            # Poll rather than a single blocking wait(timeout=...) — a command
+            # still actively producing output isn't killed just because it's
+            # been running a long time. Only genuine inactivity (no new
+            # stdout/stderr for STALL_TIMEOUT seconds — "stopped moving") or
+            # hitting the absolute self.timeout backstop ends it early; that
+            # backstop exists purely so a process that dribbles a trickle of
+            # output forever without ever finishing can't run indefinitely.
+            last_output_len = 0
+            last_activity = self.start_time
+            deadline = self.start_time + self.timeout
+            gave_up_reason = None
+            while True:
+                ret = self.process.poll()
+                if ret is not None:
+                    self.return_code = ret
+                    break
+                now = time.time()
+                output_len = len(self.stdout_data) + len(self.stderr_data)
+                if output_len != last_output_len:
+                    last_output_len = output_len
+                    last_activity = now
+                if now - last_activity > STALL_TIMEOUT:
+                    gave_up_reason = f"no new output for {STALL_TIMEOUT}s (stalled)"
+                    break
+                if now > deadline:
+                    gave_up_reason = f"exceeded {self.timeout}s absolute limit"
+                    break
+                time.sleep(1)
+
+            if gave_up_reason is None:
                 self.end_time = time.time()
 
                 # Process completed, join the threads
@@ -6922,13 +6953,13 @@ class EnhancedCommandExecutor:
                     logger.warning(f"⚠️  WARNING: Command completed with errors | Exit Code: {self.return_code} | Duration: {execution_time:.2f}s")
                     telemetry.record_execution(False, execution_time)
 
-            except subprocess.TimeoutExpired:
+            else:
                 self.end_time = time.time()
                 execution_time = self.end_time - self.start_time
 
-                # Process timed out but we might have partial results
+                # Process gave up but we might have partial results
                 self.timed_out = True
-                logger.warning(f"⏰ TIMEOUT: Command timed out after {self.timeout}s | Terminating PID {self.process.pid}")
+                logger.warning(f"⏰ TIMEOUT: Command {gave_up_reason} | Terminating PID {self.process.pid}")
 
                 # Try to terminate gracefully first
                 self.process.terminate()

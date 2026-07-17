@@ -278,12 +278,13 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     mcp = FastMCP("intellirecon-ai-mcp")
 
     async def _run_with_progress(
-        ctx: Context, endpoint: str, data: Dict[str, Any], match_hint: str
+        ctx: Context, endpoint: str, data: Dict[str, Any], match_hint: str = ""
     ) -> Dict[str, Any]:
         """
         Run a long-running engine tool call in the background while polling
         the engine's own process dashboard (api/processes/dashboard) for
-        live progress, relaying it as MCP progress notifications.
+        live progress, relaying it as MCP progress notifications every ~4s
+        for as long as the call is still outstanding.
 
         This is what makes the MCP client's `resetTimeoutOnProgress` option
         actually extend a call's timeout while real work is happening,
@@ -292,21 +293,29 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         clients that don't ask for progress), ctx.report_progress() is a
         silent no-op — this still works, it just doesn't reset anything.
 
+        A progress notification is sent on every poll UNCONDITIONALLY — a
+        generic "still running (Ns elapsed)" heartbeat by default, upgraded
+        to the real percentage/ETA when `match_hint` is given and actually
+        matches a process in the dashboard. Earlier this only reported (and
+        so only reset the timeout) on a dashboard match, which silently gave
+        up resetting for any call where the match failed — the true backstop
+        against a genuinely wedged process is the engine's own per-command
+        timeout on the underlying subprocess, not this poll.
+
         match_hint: substring (usually the target/domain/url) used to find
         our process among possibly several concurrent ones in the
         dashboard's process list, by matching against its truncated command
-        string. Best-effort: if two concurrent calls share a target, or the
-        substring doesn't appear in the (60-char-truncated) command, this
-        just won't find a match and progress reporting is skipped for that
-        poll — the underlying scan and its final result are unaffected
-        either way.
+        string. Optional and best-effort — only affects the message's
+        detail, never whether the timeout gets reset.
         """
         loop = asyncio.get_event_loop()
         task = loop.run_in_executor(None, intellirecon_client.safe_post, endpoint, data)
+        started = time.time()
         while not task.done():
             await asyncio.sleep(4)
             if task.done():
                 break
+            pct, message = 0.0, f"still running ({time.time() - started:.0f}s elapsed)"
             try:
                 dashboard = await asyncio.to_thread(
                     intellirecon_client.safe_get, "api/processes/dashboard"
@@ -319,12 +328,13 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
                         except ValueError:
                             pct = 0.0
                         eta = proc.get("eta", "")
-                        await ctx.report_progress(pct, 100, f"{proc.get('status', 'running')} (ETA {eta})")
+                        message = f"{proc.get('status', 'running')} (ETA {eta})"
                         break
             except Exception:
                 # Progress reporting is best-effort — never let a dashboard
-                # poll failure interrupt the actual scan.
+                # poll failure interrupt the actual scan or skip the heartbeat.
                 pass
+            await ctx.report_progress(pct, 100, message)
         return await task
 
     # ============================================================================
@@ -470,7 +480,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def prowler_scan(provider: str = "aws", profile: str = "default", region: str = "", checks: str = "", output_dir: str = "/tmp/prowler_output", output_format: str = "json", additional_args: str = "") -> Dict[str, Any]:
+    async def prowler_scan(ctx: Context, provider: str = "aws", profile: str = "default", region: str = "", checks: str = "", output_dir: str = "/tmp/prowler_output", output_format: str = "json", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Prowler for comprehensive cloud security assessment.
 
@@ -496,7 +506,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"☁️  Starting Prowler {provider} security assessment")
-        result = intellirecon_client.safe_post("api/tools/prowler", data)
+        result = await _run_with_progress(ctx, "api/tools/prowler", data)
         if result.get("success"):
             logger.info(f"✅ Prowler assessment completed")
         else:
@@ -504,7 +514,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def trivy_scan(scan_type: str = "image", target: str = "", output_format: str = "json", severity: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def trivy_scan(ctx: Context, scan_type: str = "image", target: str = "", output_format: str = "json", severity: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Trivy for container and filesystem vulnerability scanning.
 
@@ -528,7 +538,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Trivy {scan_type} scan: {target}")
-        result = intellirecon_client.safe_post("api/tools/trivy", data)
+        result = await _run_with_progress(ctx, "api/tools/trivy", data)
         if result.get("success"):
             logger.info(f"✅ Trivy scan completed for {target}")
         else:
@@ -540,7 +550,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def scout_suite_assessment(provider: str = "aws", profile: str = "default",
+    async def scout_suite_assessment(ctx: Context, provider: str = "aws", profile: str = "default",
                               report_dir: str = "/tmp/scout-suite", services: str = "",
                               exceptions: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -566,7 +576,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"☁️  Starting Scout Suite {provider} assessment")
-        result = intellirecon_client.safe_post("api/tools/scout-suite", data)
+        result = await _run_with_progress(ctx, "api/tools/scout-suite", data)
         if result.get("success"):
             logger.info(f"✅ Scout Suite assessment completed")
         else:
@@ -574,7 +584,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def cloudmapper_analysis(action: str = "collect", account: str = "",
+    async def cloudmapper_analysis(ctx: Context, action: str = "collect", account: str = "",
                             config: str = "config.json", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute CloudMapper for AWS network visualization and security analysis.
@@ -595,7 +605,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"☁️  Starting CloudMapper {action}")
-        result = intellirecon_client.safe_post("api/tools/cloudmapper", data)
+        result = await _run_with_progress(ctx, "api/tools/cloudmapper", data)
         if result.get("success"):
             logger.info(f"✅ CloudMapper {action} completed")
         else:
@@ -603,7 +613,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def pacu_exploitation(session_name: str = "intellirecon_session", modules: str = "",
+    async def pacu_exploitation(ctx: Context, session_name: str = "intellirecon_session", modules: str = "",
                          data_services: str = "", regions: str = "",
                          additional_args: str = "") -> Dict[str, Any]:
         """
@@ -627,7 +637,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"☁️  Starting Pacu AWS exploitation")
-        result = intellirecon_client.safe_post("api/tools/pacu", data)
+        result = await _run_with_progress(ctx, "api/tools/pacu", data)
         if result.get("success"):
             logger.info(f"✅ Pacu exploitation completed")
         else:
@@ -635,7 +645,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def kube_hunter_scan(target: str = "", remote: str = "", cidr: str = "",
+    async def kube_hunter_scan(ctx: Context, target: str = "", remote: str = "", cidr: str = "",
                         interface: str = "", active: bool = False, report: str = "json",
                         additional_args: str = "") -> Dict[str, Any]:
         """
@@ -663,7 +673,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"☁️  Starting kube-hunter Kubernetes scan")
-        result = intellirecon_client.safe_post("api/tools/kube-hunter", data)
+        result = await _run_with_progress(ctx, "api/tools/kube-hunter", data)
         if result.get("success"):
             logger.info(f"✅ kube-hunter scan completed")
         else:
@@ -671,7 +681,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def kube_bench_cis(targets: str = "", version: str = "", config_dir: str = "",
+    async def kube_bench_cis(ctx: Context, targets: str = "", version: str = "", config_dir: str = "",
                       output_format: str = "json", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute kube-bench for CIS Kubernetes benchmark checks.
@@ -694,7 +704,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"☁️  Starting kube-bench CIS benchmark")
-        result = intellirecon_client.safe_post("api/tools/kube-bench", data)
+        result = await _run_with_progress(ctx, "api/tools/kube-bench", data)
         if result.get("success"):
             logger.info(f"✅ kube-bench benchmark completed")
         else:
@@ -702,7 +712,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def docker_bench_security_scan(checks: str = "", exclude: str = "",
+    async def docker_bench_security_scan(ctx: Context, checks: str = "", exclude: str = "",
                                   output_file: str = "/tmp/docker-bench-results.json",
                                   additional_args: str = "") -> Dict[str, Any]:
         """
@@ -724,7 +734,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🐳 Starting Docker Bench Security assessment")
-        result = intellirecon_client.safe_post("api/tools/docker-bench-security", data)
+        result = await _run_with_progress(ctx, "api/tools/docker-bench-security", data)
         if result.get("success"):
             logger.info(f"✅ Docker Bench Security completed")
         else:
@@ -732,7 +742,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def clair_vulnerability_scan(image: str, config: str = "/etc/clair/config.yaml",
+    async def clair_vulnerability_scan(ctx: Context, image: str, config: str = "/etc/clair/config.yaml",
                                 output_format: str = "json", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Clair for container vulnerability analysis.
@@ -753,7 +763,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🐳 Starting Clair vulnerability scan: {image}")
-        result = intellirecon_client.safe_post("api/tools/clair", data)
+        result = await _run_with_progress(ctx, "api/tools/clair", data)
         if result.get("success"):
             logger.info(f"✅ Clair scan completed for {image}")
         else:
@@ -761,7 +771,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def falco_runtime_monitoring(config_file: str = "/etc/falco/falco.yaml",
+    async def falco_runtime_monitoring(ctx: Context, config_file: str = "/etc/falco/falco.yaml",
                                 rules_file: str = "", output_format: str = "json",
                                 duration: int = 60, additional_args: str = "") -> Dict[str, Any]:
         """
@@ -785,7 +795,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🛡️  Starting Falco runtime monitoring for {duration}s")
-        result = intellirecon_client.safe_post("api/tools/falco", data)
+        result = await _run_with_progress(ctx, "api/tools/falco", data)
         if result.get("success"):
             logger.info(f"✅ Falco monitoring completed")
         else:
@@ -793,7 +803,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def checkov_iac_scan(directory: str = ".", framework: str = "", check: str = "",
+    async def checkov_iac_scan(ctx: Context, directory: str = ".", framework: str = "", check: str = "",
                         skip_check: str = "", output_format: str = "json",
                         additional_args: str = "") -> Dict[str, Any]:
         """
@@ -819,7 +829,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Checkov IaC scan: {directory}")
-        result = intellirecon_client.safe_post("api/tools/checkov", data)
+        result = await _run_with_progress(ctx, "api/tools/checkov", data)
         if result.get("success"):
             logger.info(f"✅ Checkov scan completed")
         else:
@@ -827,7 +837,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def terrascan_iac_scan(scan_type: str = "all", iac_dir: str = ".",
+    async def terrascan_iac_scan(ctx: Context, scan_type: str = "all", iac_dir: str = ".",
                           policy_type: str = "", output_format: str = "json",
                           severity: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -853,7 +863,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Terrascan IaC scan: {iac_dir}")
-        result = intellirecon_client.safe_post("api/tools/terrascan", data)
+        result = await _run_with_progress(ctx, "api/tools/terrascan", data)
         if result.get("success"):
             logger.info(f"✅ Terrascan scan completed")
         else:
@@ -1049,7 +1059,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def dirb_scan(url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", additional_args: str = "") -> Dict[str, Any]:
+    async def dirb_scan(ctx: Context, url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Dirb for directory brute forcing with enhanced logging.
 
@@ -1067,7 +1077,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"📁 Starting Dirb scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/dirb", data)
+        result = await _run_with_progress(ctx, "api/tools/dirb", data)
         if result.get("success"):
             logger.info(f"✅ Dirb scan completed for {url}")
         else:
@@ -1075,7 +1085,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def nikto_scan(target: str, additional_args: str = "") -> Dict[str, Any]:
+    async def nikto_scan(ctx: Context, target: str, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Nikto web vulnerability scanner with enhanced logging.
 
@@ -1091,7 +1101,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔬 Starting Nikto scan: {target}")
-        result = intellirecon_client.safe_post("api/tools/nikto", data)
+        result = await _run_with_progress(ctx, "api/tools/nikto", data)
         if result.get("success"):
             logger.info(f"✅ Nikto scan completed for {target}")
         else:
@@ -1099,7 +1109,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def sqlmap_scan(url: str, data: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def sqlmap_scan(ctx: Context, url: str, data: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute SQLMap for SQL injection testing with enhanced logging.
 
@@ -1117,7 +1127,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"💉 Starting SQLMap scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/sqlmap", data_payload)
+        result = await _run_with_progress(ctx, "api/tools/sqlmap", data_payload)
         if result.get("success"):
             logger.info(f"✅ SQLMap scan completed for {url}")
         else:
@@ -1125,7 +1135,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def metasploit_run(module: str, options: Dict[str, Any] = {}) -> Dict[str, Any]:
+    async def metasploit_run(ctx: Context, module: str, options: Dict[str, Any] = {}) -> Dict[str, Any]:
         """
         Execute a Metasploit module with enhanced logging.
 
@@ -1141,7 +1151,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "options": options
         }
         logger.info(f"🚀 Starting Metasploit module: {module}")
-        result = intellirecon_client.safe_post("api/tools/metasploit", data)
+        result = await _run_with_progress(ctx, "api/tools/metasploit", data)
         if result.get("success"):
             logger.info(f"✅ Metasploit module completed: {module}")
         else:
@@ -1149,7 +1159,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def hydra_attack(
+    async def hydra_attack(ctx: Context, 
         target: str,
         service: str,
         username: str = "",
@@ -1183,7 +1193,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔑 Starting Hydra attack: {target}:{service}")
-        result = intellirecon_client.safe_post("api/tools/hydra", data)
+        result = await _run_with_progress(ctx, "api/tools/hydra", data)
         if result.get("success"):
             logger.info(f"✅ Hydra attack completed for {target}")
         else:
@@ -1191,7 +1201,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def john_crack(
+    async def john_crack(ctx: Context, 
         hash_file: str,
         wordlist: str = "/usr/share/wordlists/rockyou.txt",
         format_type: str = "",
@@ -1216,7 +1226,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔐 Starting John the Ripper: {hash_file}")
-        result = intellirecon_client.safe_post("api/tools/john", data)
+        result = await _run_with_progress(ctx, "api/tools/john", data)
         if result.get("success"):
             logger.info(f"✅ John the Ripper completed")
         else:
@@ -1224,7 +1234,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def wpscan_analyze(url: str, additional_args: str = "") -> Dict[str, Any]:
+    async def wpscan_analyze(ctx: Context, url: str, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute WPScan for WordPress vulnerability scanning with enhanced logging.
 
@@ -1240,7 +1250,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting WPScan: {url}")
-        result = intellirecon_client.safe_post("api/tools/wpscan", data)
+        result = await _run_with_progress(ctx, "api/tools/wpscan", data)
         if result.get("success"):
             logger.info(f"✅ WPScan completed for {url}")
         else:
@@ -1248,7 +1258,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def enum4linux_scan(target: str, additional_args: str = "-a") -> Dict[str, Any]:
+    async def enum4linux_scan(ctx: Context, target: str, additional_args: str = "-a") -> Dict[str, Any]:
         """
         Execute Enum4linux for SMB enumeration with enhanced logging.
 
@@ -1264,7 +1274,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Enum4linux: {target}")
-        result = intellirecon_client.safe_post("api/tools/enum4linux", data)
+        result = await _run_with_progress(ctx, "api/tools/enum4linux", data)
         if result.get("success"):
             logger.info(f"✅ Enum4linux completed for {target}")
         else:
@@ -1302,7 +1312,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def netexec_scan(target: str, protocol: str = "smb", username: str = "", password: str = "", hash_value: str = "", module: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def netexec_scan(ctx: Context, target: str, protocol: str = "smb", username: str = "", password: str = "", hash_value: str = "", module: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute NetExec (formerly CrackMapExec) for network enumeration with enhanced logging.
 
@@ -1328,7 +1338,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting NetExec {protocol} scan: {target}")
-        result = intellirecon_client.safe_post("api/tools/netexec", data)
+        result = await _run_with_progress(ctx, "api/tools/netexec", data)
         if result.get("success"):
             logger.info(f"✅ NetExec scan completed for {target}")
         else:
@@ -1362,7 +1372,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def hashcat_crack(hash_file: str, hash_type: str, attack_mode: str = "0", wordlist: str = "/usr/share/wordlists/rockyou.txt", mask: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def hashcat_crack(ctx: Context, hash_file: str, hash_type: str, attack_mode: str = "0", wordlist: str = "/usr/share/wordlists/rockyou.txt", mask: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Hashcat for advanced password cracking with enhanced logging.
 
@@ -1386,7 +1396,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔐 Starting Hashcat attack: mode {attack_mode}")
-        result = intellirecon_client.safe_post("api/tools/hashcat", data)
+        result = await _run_with_progress(ctx, "api/tools/hashcat", data)
         if result.get("success"):
             logger.info(f"✅ Hashcat attack completed")
         else:
@@ -1422,7 +1432,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def smbmap_scan(target: str, username: str = "", password: str = "", domain: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def smbmap_scan(ctx: Context, target: str, username: str = "", password: str = "", domain: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute SMBMap for SMB share enumeration with enhanced logging.
 
@@ -1444,7 +1454,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting SMBMap: {target}")
-        result = intellirecon_client.safe_post("api/tools/smbmap", data)
+        result = await _run_with_progress(ctx, "api/tools/smbmap", data)
         if result.get("success"):
             logger.info(f"✅ SMBMap completed for {target}")
         else:
@@ -1456,7 +1466,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def rustscan_fast_scan(target: str, ports: str = "", ulimit: int = 5000,
+    async def rustscan_fast_scan(ctx: Context, target: str, ports: str = "", ulimit: int = 5000,
                           batch_size: int = 4500, timeout: int = 1500,
                           scripts: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
@@ -1484,7 +1494,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"⚡ Starting Rustscan: {target}")
-        result = intellirecon_client.safe_post("api/tools/rustscan", data)
+        result = await _run_with_progress(ctx, "api/tools/rustscan", data)
         if result.get("success"):
             logger.info(f"✅ Rustscan completed for {target}")
         else:
@@ -1492,7 +1502,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def masscan_high_speed(target: str, ports: str = "1-65535", rate: int = 1000,
+    async def masscan_high_speed(ctx: Context, target: str, ports: str = "1-65535", rate: int = 1000,
                           interface: str = "", router_mac: str = "", source_ip: str = "",
                           banners: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
@@ -1522,7 +1532,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🚀 Starting Masscan: {target} at rate {rate}")
-        result = intellirecon_client.safe_post("api/tools/masscan", data)
+        result = await _run_with_progress(ctx, "api/tools/masscan", data)
         if result.get("success"):
             logger.info(f"✅ Masscan completed for {target}")
         else:
@@ -1530,7 +1540,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def nmap_advanced_scan(target: str, scan_type: str = "-sS", ports: str = "",
+    async def nmap_advanced_scan(ctx: Context, target: str, scan_type: str = "-sS", ports: str = "",
                           timing: str = "T4", nse_scripts: str = "", os_detection: bool = False,
                           version_detection: bool = False, aggressive: bool = False,
                           stealth: bool = False, additional_args: str = "") -> Dict[str, Any]:
@@ -1565,7 +1575,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Advanced Nmap: {target}")
-        result = intellirecon_client.safe_post("api/tools/nmap-advanced", data)
+        result = await _run_with_progress(ctx, "api/tools/nmap-advanced", data)
         if result.get("success"):
             logger.info(f"✅ Advanced Nmap completed for {target}")
         else:
@@ -1573,7 +1583,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def autorecon_comprehensive(target: str, output_dir: str = "/tmp/autorecon",
+    async def autorecon_comprehensive(ctx: Context, target: str, output_dir: str = "/tmp/autorecon",
                                port_scans: str = "top-100-ports", service_scans: str = "default",
                                heartbeat: int = 60, timeout: int = 300,
                                additional_args: str = "") -> Dict[str, Any]:
@@ -1602,7 +1612,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔄 Starting AutoRecon: {target}")
-        result = intellirecon_client.safe_post("api/tools/autorecon", data)
+        result = await _run_with_progress(ctx, "api/tools/autorecon", data)
         if result.get("success"):
             logger.info(f"✅ AutoRecon completed for {target}")
         else:
@@ -1610,7 +1620,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def enum4linux_ng_advanced(target: str, username: str = "", password: str = "",
+    async def enum4linux_ng_advanced(ctx: Context, target: str, username: str = "", password: str = "",
                                domain: str = "", shares: bool = True, users: bool = True,
                                groups: bool = True, policy: bool = True,
                                additional_args: str = "") -> Dict[str, Any]:
@@ -1643,7 +1653,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Enum4linux-ng: {target}")
-        result = intellirecon_client.safe_post("api/tools/enum4linux-ng", data)
+        result = await _run_with_progress(ctx, "api/tools/enum4linux-ng", data)
         if result.get("success"):
             logger.info(f"✅ Enum4linux-ng completed for {target}")
         else:
@@ -1651,7 +1661,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def rpcclient_enumeration(target: str, username: str = "", password: str = "",
+    async def rpcclient_enumeration(ctx: Context, target: str, username: str = "", password: str = "",
                              domain: str = "", commands: str = "enumdomusers;enumdomgroups;querydominfo",
                              additional_args: str = "") -> Dict[str, Any]:
         """
@@ -1677,7 +1687,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting rpcclient: {target}")
-        result = intellirecon_client.safe_post("api/tools/rpcclient", data)
+        result = await _run_with_progress(ctx, "api/tools/rpcclient", data)
         if result.get("success"):
             logger.info(f"✅ rpcclient completed for {target}")
         else:
@@ -1685,7 +1695,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def nbtscan_netbios(target: str, verbose: bool = False, timeout: int = 2,
+    async def nbtscan_netbios(ctx: Context, target: str, verbose: bool = False, timeout: int = 2,
                        additional_args: str = "") -> Dict[str, Any]:
         """
         Execute nbtscan for NetBIOS name scanning with enhanced logging.
@@ -1706,7 +1716,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting nbtscan: {target}")
-        result = intellirecon_client.safe_post("api/tools/nbtscan", data)
+        result = await _run_with_progress(ctx, "api/tools/nbtscan", data)
         if result.get("success"):
             logger.info(f"✅ nbtscan completed for {target}")
         else:
@@ -1714,7 +1724,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def arp_scan_discovery(target: str = "", interface: str = "", local_network: bool = False,
+    async def arp_scan_discovery(ctx: Context, target: str = "", interface: str = "", local_network: bool = False,
                           timeout: int = 500, retry: int = 3, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute arp-scan for network discovery with enhanced logging.
@@ -1739,7 +1749,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting arp-scan: {target if target else 'local network'}")
-        result = intellirecon_client.safe_post("api/tools/arp-scan", data)
+        result = await _run_with_progress(ctx, "api/tools/arp-scan", data)
         if result.get("success"):
             logger.info(f"✅ arp-scan completed")
         else:
@@ -1747,7 +1757,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def responder_credential_harvest(interface: str = "eth0", analyze: bool = False,
+    async def responder_credential_harvest(ctx: Context, interface: str = "eth0", analyze: bool = False,
                                    wpad: bool = True, force_wpad_auth: bool = False,
                                    fingerprint: bool = False, duration: int = 300,
                                    additional_args: str = "") -> Dict[str, Any]:
@@ -1776,7 +1786,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Responder on interface: {interface}")
-        result = intellirecon_client.safe_post("api/tools/responder", data)
+        result = await _run_with_progress(ctx, "api/tools/responder", data)
         if result.get("success"):
             logger.info(f"✅ Responder completed")
         else:
@@ -1784,7 +1794,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def volatility_analyze(memory_file: str, plugin: str, profile: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def volatility_analyze(ctx: Context, memory_file: str, plugin: str, profile: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Volatility for memory forensics analysis with enhanced logging.
 
@@ -1804,7 +1814,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🧠 Starting Volatility analysis: {plugin}")
-        result = intellirecon_client.safe_post("api/tools/volatility", data)
+        result = await _run_with_progress(ctx, "api/tools/volatility", data)
         if result.get("success"):
             logger.info(f"✅ Volatility analysis completed")
         else:
@@ -1812,7 +1822,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def msfvenom_generate(payload: str, format_type: str = "", output_file: str = "", encoder: str = "", iterations: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def msfvenom_generate(ctx: Context, payload: str, format_type: str = "", output_file: str = "", encoder: str = "", iterations: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute MSFVenom for payload generation with enhanced logging.
 
@@ -1836,7 +1846,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🚀 Starting MSFVenom payload generation: {payload}")
-        result = intellirecon_client.safe_post("api/tools/msfvenom", data)
+        result = await _run_with_progress(ctx, "api/tools/msfvenom", data)
         if result.get("success"):
             logger.info(f"✅ MSFVenom payload generated")
         else:
@@ -1848,7 +1858,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def gdb_analyze(binary: str, commands: str = "", script_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def gdb_analyze(ctx: Context, binary: str, commands: str = "", script_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute GDB for binary analysis and debugging with enhanced logging.
 
@@ -1868,7 +1878,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting GDB analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/gdb", data)
+        result = await _run_with_progress(ctx, "api/tools/gdb", data)
         if result.get("success"):
             logger.info(f"✅ GDB analysis completed for {binary}")
         else:
@@ -1876,7 +1886,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def radare2_analyze(binary: str, commands: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def radare2_analyze(ctx: Context, binary: str, commands: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Radare2 for binary analysis and reverse engineering with enhanced logging.
 
@@ -1894,7 +1904,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting Radare2 analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/radare2", data)
+        result = await _run_with_progress(ctx, "api/tools/radare2", data)
         if result.get("success"):
             logger.info(f"✅ Radare2 analysis completed for {binary}")
         else:
@@ -1902,7 +1912,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def binwalk_analyze(file_path: str, extract: bool = False, additional_args: str = "") -> Dict[str, Any]:
+    async def binwalk_analyze(ctx: Context, file_path: str, extract: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Binwalk for firmware and file analysis with enhanced logging.
 
@@ -1920,7 +1930,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting Binwalk analysis: {file_path}")
-        result = intellirecon_client.safe_post("api/tools/binwalk", data)
+        result = await _run_with_progress(ctx, "api/tools/binwalk", data)
         if result.get("success"):
             logger.info(f"✅ Binwalk analysis completed for {file_path}")
         else:
@@ -1928,7 +1938,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def ropgadget_search(binary: str, gadget_type: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def ropgadget_search(ctx: Context, binary: str, gadget_type: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Search for ROP gadgets in a binary using ROPgadget with enhanced logging.
 
@@ -1946,7 +1956,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting ROPgadget search: {binary}")
-        result = intellirecon_client.safe_post("api/tools/ropgadget", data)
+        result = await _run_with_progress(ctx, "api/tools/ropgadget", data)
         if result.get("success"):
             logger.info(f"✅ ROPgadget search completed for {binary}")
         else:
@@ -1954,7 +1964,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def checksec_analyze(binary: str) -> Dict[str, Any]:
+    async def checksec_analyze(ctx: Context, binary: str) -> Dict[str, Any]:
         """
         Check security features of a binary with enhanced logging.
 
@@ -1968,7 +1978,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "binary": binary
         }
         logger.info(f"🔧 Starting Checksec analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/checksec", data)
+        result = await _run_with_progress(ctx, "api/tools/checksec", data)
         if result.get("success"):
             logger.info(f"✅ Checksec analysis completed for {binary}")
         else:
@@ -1976,7 +1986,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def xxd_hexdump(file_path: str, offset: str = "0", length: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def xxd_hexdump(ctx: Context, file_path: str, offset: str = "0", length: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Create a hex dump of a file using xxd with enhanced logging.
 
@@ -1996,7 +2006,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting XXD hex dump: {file_path}")
-        result = intellirecon_client.safe_post("api/tools/xxd", data)
+        result = await _run_with_progress(ctx, "api/tools/xxd", data)
         if result.get("success"):
             logger.info(f"✅ XXD hex dump completed for {file_path}")
         else:
@@ -2004,7 +2014,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def strings_extract(file_path: str, min_len: int = 4, additional_args: str = "") -> Dict[str, Any]:
+    async def strings_extract(ctx: Context, file_path: str, min_len: int = 4, additional_args: str = "") -> Dict[str, Any]:
         """
         Extract strings from a binary file with enhanced logging.
 
@@ -2022,7 +2032,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting Strings extraction: {file_path}")
-        result = intellirecon_client.safe_post("api/tools/strings", data)
+        result = await _run_with_progress(ctx, "api/tools/strings", data)
         if result.get("success"):
             logger.info(f"✅ Strings extraction completed for {file_path}")
         else:
@@ -2030,7 +2040,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def objdump_analyze(binary: str, disassemble: bool = True, additional_args: str = "") -> Dict[str, Any]:
+    async def objdump_analyze(ctx: Context, binary: str, disassemble: bool = True, additional_args: str = "") -> Dict[str, Any]:
         """
         Analyze a binary using objdump with enhanced logging.
 
@@ -2048,7 +2058,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting Objdump analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/objdump", data)
+        result = await _run_with_progress(ctx, "api/tools/objdump", data)
         if result.get("success"):
             logger.info(f"✅ Objdump analysis completed for {binary}")
         else:
@@ -2060,7 +2070,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def ghidra_analysis(binary: str, project_name: str = "intellirecon_analysis",
+    async def ghidra_analysis(ctx: Context, binary: str, project_name: str = "intellirecon_analysis",
                        script_file: str = "", analysis_timeout: int = 300,
                        output_format: str = "xml", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2086,7 +2096,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting Ghidra analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/ghidra", data)
+        result = await _run_with_progress(ctx, "api/tools/ghidra", data)
         if result.get("success"):
             logger.info(f"✅ Ghidra analysis completed for {binary}")
         else:
@@ -2094,7 +2104,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def pwntools_exploit(script_content: str = "", target_binary: str = "",
+    async def pwntools_exploit(ctx: Context, script_content: str = "", target_binary: str = "",
                         target_host: str = "", target_port: int = 0,
                         exploit_type: str = "local", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2120,7 +2130,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting Pwntools exploit: {exploit_type}")
-        result = intellirecon_client.safe_post("api/tools/pwntools", data)
+        result = await _run_with_progress(ctx, "api/tools/pwntools", data)
         if result.get("success"):
             logger.info(f"✅ Pwntools exploit completed")
         else:
@@ -2128,7 +2138,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def one_gadget_search(libc_path: str, level: int = 1, additional_args: str = "") -> Dict[str, Any]:
+    async def one_gadget_search(ctx: Context, libc_path: str, level: int = 1, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute one_gadget to find one-shot RCE gadgets in libc.
 
@@ -2146,7 +2156,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting one_gadget analysis: {libc_path}")
-        result = intellirecon_client.safe_post("api/tools/one-gadget", data)
+        result = await _run_with_progress(ctx, "api/tools/one-gadget", data)
         if result.get("success"):
             logger.info(f"✅ one_gadget analysis completed")
         else:
@@ -2154,7 +2164,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def libc_database_lookup(action: str = "find", symbols: str = "",
+    async def libc_database_lookup(ctx: Context, action: str = "find", symbols: str = "",
                             libc_id: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute libc-database for libc identification and offset lookup.
@@ -2175,7 +2185,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting libc-database {action}: {symbols or libc_id}")
-        result = intellirecon_client.safe_post("api/tools/libc-database", data)
+        result = await _run_with_progress(ctx, "api/tools/libc-database", data)
         if result.get("success"):
             logger.info(f"✅ libc-database {action} completed")
         else:
@@ -2183,7 +2193,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def gdb_peda_debug(binary: str = "", commands: str = "", attach_pid: int = 0,
+    async def gdb_peda_debug(ctx: Context, binary: str = "", commands: str = "", attach_pid: int = 0,
                       core_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute GDB with PEDA for enhanced debugging and exploitation.
@@ -2206,7 +2216,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting GDB-PEDA analysis: {binary or f'PID {attach_pid}' or core_file}")
-        result = intellirecon_client.safe_post("api/tools/gdb-peda", data)
+        result = await _run_with_progress(ctx, "api/tools/gdb-peda", data)
         if result.get("success"):
             logger.info(f"✅ GDB-PEDA analysis completed")
         else:
@@ -2214,7 +2224,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def angr_symbolic_execution(binary: str, script_content: str = "",
+    async def angr_symbolic_execution(ctx: Context, binary: str, script_content: str = "",
                                find_address: str = "", avoid_addresses: str = "",
                                analysis_type: str = "symbolic", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2240,7 +2250,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting angr analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/angr", data)
+        result = await _run_with_progress(ctx, "api/tools/angr", data)
         if result.get("success"):
             logger.info(f"✅ angr analysis completed")
         else:
@@ -2248,7 +2258,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def ropper_gadget_search(binary: str, gadget_type: str = "rop", quality: int = 1,
+    async def ropper_gadget_search(ctx: Context, binary: str, gadget_type: str = "rop", quality: int = 1,
                             arch: str = "", search_string: str = "",
                             additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2274,7 +2284,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting ropper analysis: {binary}")
-        result = intellirecon_client.safe_post("api/tools/ropper", data)
+        result = await _run_with_progress(ctx, "api/tools/ropper", data)
         if result.get("success"):
             logger.info(f"✅ ropper analysis completed")
         else:
@@ -2282,7 +2292,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def pwninit_setup(binary: str, libc: str = "", ld: str = "",
+    async def pwninit_setup(ctx: Context, binary: str, libc: str = "", ld: str = "",
                      template_type: str = "python", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute pwninit for CTF binary exploitation setup.
@@ -2305,7 +2315,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔧 Starting pwninit setup: {binary}")
-        result = intellirecon_client.safe_post("api/tools/pwninit", data)
+        result = await _run_with_progress(ctx, "api/tools/pwninit", data)
         if result.get("success"):
             logger.info(f"✅ pwninit setup completed")
         else:
@@ -2313,7 +2323,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def feroxbuster_scan(url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", threads: int = 10, additional_args: str = "") -> Dict[str, Any]:
+    async def feroxbuster_scan(ctx: Context, url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", threads: int = 10, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Feroxbuster for recursive content discovery with enhanced logging.
 
@@ -2333,7 +2343,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Feroxbuster scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/feroxbuster", data)
+        result = await _run_with_progress(ctx, "api/tools/feroxbuster", data)
         if result.get("success"):
             logger.info(f"✅ Feroxbuster scan completed for {url}")
         else:
@@ -2341,7 +2351,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def dotdotpwn_scan(target: str, module: str = "http", additional_args: str = "") -> Dict[str, Any]:
+    async def dotdotpwn_scan(ctx: Context, target: str, module: str = "http", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute DotDotPwn for directory traversal testing with enhanced logging.
 
@@ -2359,7 +2369,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting DotDotPwn scan: {target}")
-        result = intellirecon_client.safe_post("api/tools/dotdotpwn", data)
+        result = await _run_with_progress(ctx, "api/tools/dotdotpwn", data)
         if result.get("success"):
             logger.info(f"✅ DotDotPwn scan completed for {target}")
         else:
@@ -2367,7 +2377,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def xsser_scan(url: str, params: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def xsser_scan(ctx: Context, url: str, params: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute XSSer for XSS vulnerability testing with enhanced logging.
 
@@ -2385,7 +2395,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting XSSer scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/xsser", data)
+        result = await _run_with_progress(ctx, "api/tools/xsser", data)
         if result.get("success"):
             logger.info(f"✅ XSSer scan completed for {url}")
         else:
@@ -2393,7 +2403,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def wfuzz_scan(url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", additional_args: str = "") -> Dict[str, Any]:
+    async def wfuzz_scan(ctx: Context, url: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Wfuzz for web application fuzzing with enhanced logging.
 
@@ -2411,7 +2421,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Wfuzz scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/wfuzz", data)
+        result = await _run_with_progress(ctx, "api/tools/wfuzz", data)
         if result.get("success"):
             logger.info(f"✅ Wfuzz scan completed for {url}")
         else:
@@ -2423,7 +2433,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def dirsearch_scan(url: str, extensions: str = "php,html,js,txt,xml,json",
+    async def dirsearch_scan(ctx: Context, url: str, extensions: str = "php,html,js,txt,xml,json",
                       wordlist: str = "/usr/share/wordlists/dirsearch/common.txt",
                       threads: int = 30, recursive: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2449,7 +2459,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"📁 Starting Dirsearch scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/dirsearch", data)
+        result = await _run_with_progress(ctx, "api/tools/dirsearch", data)
         if result.get("success"):
             logger.info(f"✅ Dirsearch scan completed for {url}")
         else:
@@ -2457,7 +2467,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def katana_crawl(url: str, depth: int = 3, js_crawl: bool = True,
+    async def katana_crawl(ctx: Context, url: str, depth: int = 3, js_crawl: bool = True,
                     form_extraction: bool = True, output_format: str = "json",
                     additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2483,7 +2493,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"⚔️  Starting Katana crawl: {url}")
-        result = intellirecon_client.safe_post("api/tools/katana", data)
+        result = await _run_with_progress(ctx, "api/tools/katana", data)
         if result.get("success"):
             logger.info(f"✅ Katana crawl completed for {url}")
         else:
@@ -2491,7 +2501,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def gau_discovery(domain: str, providers: str = "wayback,commoncrawl,otx,urlscan",
+    async def gau_discovery(ctx: Context, domain: str, providers: str = "wayback,commoncrawl,otx,urlscan",
                      include_subs: bool = True, blacklist: str = "png,jpg,gif,jpeg,swf,woff,svg,pdf,css,ico",
                      additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2515,7 +2525,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"📡 Starting Gau URL discovery: {domain}")
-        result = intellirecon_client.safe_post("api/tools/gau", data)
+        result = await _run_with_progress(ctx, "api/tools/gau", data)
         if result.get("success"):
             logger.info(f"✅ Gau URL discovery completed for {domain}")
         else:
@@ -2523,7 +2533,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def waybackurls_discovery(domain: str, get_versions: bool = False,
+    async def waybackurls_discovery(ctx: Context, domain: str, get_versions: bool = False,
                              no_subs: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Waybackurls for historical URL discovery with enhanced logging.
@@ -2544,7 +2554,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🕰️  Starting Waybackurls discovery: {domain}")
-        result = intellirecon_client.safe_post("api/tools/waybackurls", data)
+        result = await _run_with_progress(ctx, "api/tools/waybackurls", data)
         if result.get("success"):
             logger.info(f"✅ Waybackurls discovery completed for {domain}")
         else:
@@ -2552,7 +2562,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def arjun_parameter_discovery(url: str, method: str = "GET", wordlist: str = "",
+    async def arjun_parameter_discovery(ctx: Context, url: str, method: str = "GET", wordlist: str = "",
                                  delay: int = 0, threads: int = 25, stable: bool = False,
                                  additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2580,7 +2590,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🎯 Starting Arjun parameter discovery: {url}")
-        result = intellirecon_client.safe_post("api/tools/arjun", data)
+        result = await _run_with_progress(ctx, "api/tools/arjun", data)
         if result.get("success"):
             logger.info(f"✅ Arjun parameter discovery completed for {url}")
         else:
@@ -2588,7 +2598,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def paramspider_mining(domain: str, level: int = 2,
+    async def paramspider_mining(ctx: Context, domain: str, level: int = 2,
                           exclude: str = "png,jpg,gif,jpeg,swf,woff,svg,pdf,css,ico",
                           output: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2612,7 +2622,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🕷️  Starting ParamSpider mining: {domain}")
-        result = intellirecon_client.safe_post("api/tools/paramspider", data)
+        result = await _run_with_progress(ctx, "api/tools/paramspider", data)
         if result.get("success"):
             logger.info(f"✅ ParamSpider mining completed for {domain}")
         else:
@@ -2620,7 +2630,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def x8_parameter_discovery(url: str, wordlist: str = "/usr/share/wordlists/x8/params.txt",
+    async def x8_parameter_discovery(ctx: Context, url: str, wordlist: str = "/usr/share/wordlists/x8/params.txt",
                               method: str = "GET", body: str = "", headers: str = "",
                               additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2646,7 +2656,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting x8 parameter discovery: {url}")
-        result = intellirecon_client.safe_post("api/tools/x8", data)
+        result = await _run_with_progress(ctx, "api/tools/x8", data)
         if result.get("success"):
             logger.info(f"✅ x8 parameter discovery completed for {url}")
         else:
@@ -2654,7 +2664,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def jaeles_vulnerability_scan(url: str, signatures: str = "", config: str = "",
+    async def jaeles_vulnerability_scan(ctx: Context, url: str, signatures: str = "", config: str = "",
                                  threads: int = 20, timeout: int = 20,
                                  additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2680,7 +2690,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔬 Starting Jaeles vulnerability scan: {url}")
-        result = intellirecon_client.safe_post("api/tools/jaeles", data)
+        result = await _run_with_progress(ctx, "api/tools/jaeles", data)
         if result.get("success"):
             logger.info(f"✅ Jaeles vulnerability scan completed for {url}")
         else:
@@ -2688,7 +2698,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def dalfox_xss_scan(url: str, pipe_mode: bool = False, blind: bool = False,
+    async def dalfox_xss_scan(ctx: Context, url: str, pipe_mode: bool = False, blind: bool = False,
                        mining_dom: bool = True, mining_dict: bool = True,
                        custom_payload: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
@@ -2716,7 +2726,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🎯 Starting Dalfox XSS scan: {url if url else 'pipe mode'}")
-        result = intellirecon_client.safe_post("api/tools/dalfox", data)
+        result = await _run_with_progress(ctx, "api/tools/dalfox", data)
         if result.get("success"):
             logger.info(f"✅ Dalfox XSS scan completed")
         else:
@@ -2724,7 +2734,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def httpx_probe(target: str, probe: bool = True, tech_detect: bool = False,
+    async def httpx_probe(ctx: Context, target: str, probe: bool = True, tech_detect: bool = False,
                    status_code: bool = False, content_length: bool = False,
                    title: bool = False, web_server: bool = False, threads: int = 50,
                    additional_args: str = "") -> Dict[str, Any]:
@@ -2757,7 +2767,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🌍 Starting httpx probe: {target}")
-        result = intellirecon_client.safe_post("api/tools/httpx", data)
+        result = await _run_with_progress(ctx, "api/tools/httpx", data)
         if result.get("success"):
             logger.info(f"✅ httpx probe completed for {target}")
         else:
@@ -2765,7 +2775,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def anew_data_processing(input_data: str, output_file: str = "",
+    async def anew_data_processing(ctx: Context, input_data: str, output_file: str = "",
                             additional_args: str = "") -> Dict[str, Any]:
         """
         Execute anew for appending new lines to files (useful for data processing).
@@ -2784,7 +2794,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info("📝 Starting anew data processing")
-        result = intellirecon_client.safe_post("api/tools/anew", data)
+        result = await _run_with_progress(ctx, "api/tools/anew", data)
         if result.get("success"):
             logger.info("✅ anew data processing completed")
         else:
@@ -2792,7 +2802,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def qsreplace_parameter_replacement(urls: str, replacement: str = "FUZZ",
+    async def qsreplace_parameter_replacement(ctx: Context, urls: str, replacement: str = "FUZZ",
                                        additional_args: str = "") -> Dict[str, Any]:
         """
         Execute qsreplace for query string parameter replacement.
@@ -2811,7 +2821,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info("🔄 Starting qsreplace parameter replacement")
-        result = intellirecon_client.safe_post("api/tools/qsreplace", data)
+        result = await _run_with_progress(ctx, "api/tools/qsreplace", data)
         if result.get("success"):
             logger.info("✅ qsreplace parameter replacement completed")
         else:
@@ -2819,7 +2829,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def uro_url_filtering(urls: str, whitelist: str = "", blacklist: str = "",
+    async def uro_url_filtering(ctx: Context, urls: str, whitelist: str = "", blacklist: str = "",
                          additional_args: str = "") -> Dict[str, Any]:
         """
         Execute uro for filtering out similar URLs.
@@ -2840,7 +2850,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info("🔍 Starting uro URL filtering")
-        result = intellirecon_client.safe_post("api/tools/uro", data)
+        result = await _run_with_progress(ctx, "api/tools/uro", data)
         if result.get("success"):
             logger.info("✅ uro URL filtering completed")
         else:
@@ -2989,7 +2999,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def api_fuzzer(base_url: str, endpoints: str = "", methods: str = "GET,POST,PUT,DELETE", wordlist: str = "/usr/share/wordlists/api/api-endpoints.txt") -> Dict[str, Any]:
+    async def api_fuzzer(ctx: Context, base_url: str, endpoints: str = "", methods: str = "GET,POST,PUT,DELETE", wordlist: str = "/usr/share/wordlists/api/api-endpoints.txt") -> Dict[str, Any]:
         """
         Advanced API endpoint fuzzing with intelligent parameter discovery.
 
@@ -3010,7 +3020,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"🔍 Starting API fuzzing: {base_url}")
-        result = intellirecon_client.safe_post("api/tools/api_fuzzer", data)
+        result = await _run_with_progress(ctx, "api/tools/api_fuzzer", data)
 
         if result.get("success"):
             fuzzing_type = result.get("fuzzing_type", "unknown")
@@ -3025,7 +3035,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def graphql_scanner(endpoint: str, introspection: bool = True, query_depth: int = 10, test_mutations: bool = True) -> Dict[str, Any]:
+    async def graphql_scanner(ctx: Context, endpoint: str, introspection: bool = True, query_depth: int = 10, test_mutations: bool = True) -> Dict[str, Any]:
         """
         Advanced GraphQL security scanning and introspection.
 
@@ -3046,7 +3056,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"🔍 Starting GraphQL security scan: {endpoint}")
-        result = intellirecon_client.safe_post("api/tools/graphql_scanner", data)
+        result = await _run_with_progress(ctx, "api/tools/graphql_scanner", data)
 
         if result.get("success"):
             scan_results = result.get("graphql_scan_results", {})
@@ -3067,7 +3077,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def jwt_analyzer(jwt_token: str, target_url: str = "") -> Dict[str, Any]:
+    async def jwt_analyzer(ctx: Context, jwt_token: str, target_url: str = "") -> Dict[str, Any]:
         """
         Advanced JWT token analysis and vulnerability testing.
 
@@ -3084,7 +3094,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"🔍 Starting JWT security analysis")
-        result = intellirecon_client.safe_post("api/tools/jwt_analyzer", data)
+        result = await _run_with_progress(ctx, "api/tools/jwt_analyzer", data)
 
         if result.get("success"):
             analysis = result.get("jwt_analysis_results", {})
@@ -3106,7 +3116,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def api_schema_analyzer(schema_url: str, schema_type: str = "openapi") -> Dict[str, Any]:
+    async def api_schema_analyzer(ctx: Context, schema_url: str, schema_type: str = "openapi") -> Dict[str, Any]:
         """
         Analyze API schemas and identify potential security issues.
 
@@ -3123,7 +3133,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"🔍 Starting API schema analysis: {schema_url}")
-        result = intellirecon_client.safe_post("api/tools/api_schema_analyzer", data)
+        result = await _run_with_progress(ctx, "api/tools/api_schema_analyzer", data)
 
         if result.get("success"):
             analysis = result.get("schema_analysis_results", {})
@@ -3249,7 +3259,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def volatility3_analyze(memory_file: str, plugin: str, output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def volatility3_analyze(ctx: Context, memory_file: str, plugin: str, output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Volatility3 for advanced memory forensics with enhanced logging.
 
@@ -3269,7 +3279,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🧠 Starting Volatility3 analysis: {plugin}")
-        result = intellirecon_client.safe_post("api/tools/volatility3", data)
+        result = await _run_with_progress(ctx, "api/tools/volatility3", data)
         if result.get("success"):
             logger.info(f"✅ Volatility3 analysis completed")
         else:
@@ -3277,7 +3287,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def foremost_carving(input_file: str, output_dir: str = "/tmp/foremost_output", file_types: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def foremost_carving(ctx: Context, input_file: str, output_dir: str = "/tmp/foremost_output", file_types: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Foremost for file carving with enhanced logging.
 
@@ -3297,7 +3307,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"📁 Starting Foremost file carving: {input_file}")
-        result = intellirecon_client.safe_post("api/tools/foremost", data)
+        result = await _run_with_progress(ctx, "api/tools/foremost", data)
         if result.get("success"):
             logger.info(f"✅ Foremost carving completed")
         else:
@@ -3305,7 +3315,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def steghide_analysis(action: str, cover_file: str, embed_file: str = "", passphrase: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def steghide_analysis(ctx: Context, action: str, cover_file: str, embed_file: str = "", passphrase: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Steghide for steganography analysis with enhanced logging.
 
@@ -3329,7 +3339,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🖼️ Starting Steghide {action}: {cover_file}")
-        result = intellirecon_client.safe_post("api/tools/steghide", data)
+        result = await _run_with_progress(ctx, "api/tools/steghide", data)
         if result.get("success"):
             logger.info(f"✅ Steghide {action} completed")
         else:
@@ -3337,7 +3347,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def exiftool_extract(file_path: str, output_format: str = "", tags: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def exiftool_extract(ctx: Context, file_path: str, output_format: str = "", tags: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute ExifTool for metadata extraction with enhanced logging.
 
@@ -3357,7 +3367,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"📷 Starting ExifTool analysis: {file_path}")
-        result = intellirecon_client.safe_post("api/tools/exiftool", data)
+        result = await _run_with_progress(ctx, "api/tools/exiftool", data)
         if result.get("success"):
             logger.info(f"✅ ExifTool analysis completed")
         else:
@@ -3365,7 +3375,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def hashpump_attack(signature: str, data: str, key_length: str, append_data: str, additional_args: str = "") -> Dict[str, Any]:
+    async def hashpump_attack(ctx: Context, signature: str, data: str, key_length: str, append_data: str, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute HashPump for hash length extension attacks with enhanced logging.
 
@@ -3387,7 +3397,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔐 Starting HashPump attack")
-        result = intellirecon_client.safe_post("api/tools/hashpump", data)
+        result = await _run_with_progress(ctx, "api/tools/hashpump", data)
         if result.get("success"):
             logger.info(f"✅ HashPump attack completed")
         else:
@@ -3399,7 +3409,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def hakrawler_crawl(url: str, depth: int = 2, forms: bool = True, robots: bool = True, sitemap: bool = True, wayback: bool = False, additional_args: str = "") -> Dict[str, Any]:
+    async def hakrawler_crawl(ctx: Context, url: str, depth: int = 2, forms: bool = True, robots: bool = True, sitemap: bool = True, wayback: bool = False, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Hakrawler for web endpoint discovery with enhanced logging.
 
@@ -3432,7 +3442,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🕷️ Starting Hakrawler crawling: {url}")
-        result = intellirecon_client.safe_post("api/tools/hakrawler", data)
+        result = await _run_with_progress(ctx, "api/tools/hakrawler", data)
         if result.get("success"):
             logger.info(f"✅ Hakrawler crawling completed")
         else:
@@ -3440,7 +3450,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def httpx_probe(targets: str = "", target_file: str = "", ports: str = "", methods: str = "GET", status_code: str = "", content_length: bool = False, output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def httpx_probe(ctx: Context, targets: str = "", target_file: str = "", ports: str = "", methods: str = "GET", status_code: str = "", content_length: bool = False, output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute HTTPx for HTTP probing with enhanced logging.
 
@@ -3468,7 +3478,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🌐 Starting HTTPx probing")
-        result = intellirecon_client.safe_post("api/tools/httpx", data)
+        result = await _run_with_progress(ctx, "api/tools/httpx", data)
         if result.get("success"):
             logger.info(f"✅ HTTPx probing completed")
         else:
@@ -3476,7 +3486,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def paramspider_discovery(domain: str, exclude: str = "", output_file: str = "", level: int = 2, additional_args: str = "") -> Dict[str, Any]:
+    async def paramspider_discovery(ctx: Context, domain: str, exclude: str = "", output_file: str = "", level: int = 2, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute ParamSpider for parameter discovery with enhanced logging.
 
@@ -3498,7 +3508,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting ParamSpider discovery: {domain}")
-        result = intellirecon_client.safe_post("api/tools/paramspider", data)
+        result = await _run_with_progress(ctx, "api/tools/paramspider", data)
         if result.get("success"):
             logger.info(f"✅ ParamSpider discovery completed")
         else:
@@ -3510,7 +3520,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def burpsuite_scan(project_file: str = "", config_file: str = "", target: str = "", headless: bool = False, scan_type: str = "", scan_config: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def burpsuite_scan(ctx: Context, project_file: str = "", config_file: str = "", target: str = "", headless: bool = False, scan_type: str = "", scan_config: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Burp Suite with enhanced logging.
 
@@ -3538,7 +3548,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Burp Suite scan")
-        result = intellirecon_client.safe_post("api/tools/burpsuite", data)
+        result = await _run_with_progress(ctx, "api/tools/burpsuite", data)
         if result.get("success"):
             logger.info(f"✅ Burp Suite scan completed")
         else:
@@ -3546,7 +3556,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def zap_scan(target: str = "", scan_type: str = "baseline", api_key: str = "", daemon: bool = False, port: str = "8090", host: str = "0.0.0.0", format_type: str = "xml", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def zap_scan(ctx: Context, target: str = "", scan_type: str = "baseline", api_key: str = "", daemon: bool = False, port: str = "8090", host: str = "0.0.0.0", format_type: str = "xml", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute OWASP ZAP with enhanced logging.
 
@@ -3576,7 +3586,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting ZAP scan: {target}")
-        result = intellirecon_client.safe_post("api/tools/zap", data)
+        result = await _run_with_progress(ctx, "api/tools/zap", data)
         if result.get("success"):
             logger.info(f"✅ ZAP scan completed for {target}")
         else:
@@ -3584,7 +3594,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def arjun_scan(url: str, method: str = "GET", data: str = "", headers: str = "", timeout: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
+    async def arjun_scan(ctx: Context, url: str, method: str = "GET", data: str = "", headers: str = "", timeout: str = "", output_file: str = "", additional_args: str = "") -> Dict[str, Any]:
         """
         Execute Arjun for parameter discovery with enhanced logging.
 
@@ -3610,7 +3620,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting Arjun parameter discovery: {url}")
-        result = intellirecon_client.safe_post("api/tools/arjun", data)
+        result = await _run_with_progress(ctx, "api/tools/arjun", data)
         if result.get("success"):
             logger.info(f"✅ Arjun completed for {url}")
         else:
@@ -3618,7 +3628,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def wafw00f_scan(target: str, additional_args: str = "") -> Dict[str, Any]:
+    async def wafw00f_scan(ctx: Context, target: str, additional_args: str = "") -> Dict[str, Any]:
         """
         Execute wafw00f to identify and fingerprint WAF products with enhanced logging.
 
@@ -3634,7 +3644,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🛡️ Starting Wafw00f WAF detection: {target}")
-        result = intellirecon_client.safe_post("api/tools/wafw00f", data)
+        result = await _run_with_progress(ctx, "api/tools/wafw00f", data)
         if result.get("success"):
             logger.info(f"✅ Wafw00f completed for {target}")
         else:
@@ -3696,7 +3706,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def autorecon_scan(
+    async def autorecon_scan(ctx: Context, 
         target: str = "",
         target_file: str = "",
         ports: str = "",
@@ -3826,7 +3836,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "additional_args": additional_args
         }
         logger.info(f"🔍 Starting AutoRecon comprehensive enumeration: {target}")
-        result = intellirecon_client.safe_post("api/tools/autorecon", data)
+        result = await _run_with_progress(ctx, "api/tools/autorecon", data)
         if result.get("success"):
             logger.info(f"✅ AutoRecon comprehensive enumeration completed for {target}")
         else:
@@ -5205,7 +5215,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
     # ============================================================================
 
     @mcp.tool()
-    def http_framework_test(url: str, method: str = "GET", data: dict = {},
+    async def http_framework_test(ctx: Context, url: str, method: str = "GET", data: dict = {},
                            headers: dict = {}, cookies: dict = {}, action: str = "request") -> Dict[str, Any]:
         """
         Enhanced HTTP testing framework (Burp Suite alternative) for comprehensive web security testing.
@@ -5231,7 +5241,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"{IntelliReconColors.FIRE_RED}🔥 Starting HTTP Framework {action}: {url}{IntelliReconColors.RESET}")
-        result = intellirecon_client.safe_post("api/tools/http-framework", data_payload)
+        result = await _run_with_progress(ctx, "api/tools/http-framework", data_payload)
 
         if result.get("success"):
             logger.info(f"{IntelliReconColors.SUCCESS}✅ HTTP Framework {action} completed for {url}{IntelliReconColors.RESET}")
@@ -5246,7 +5256,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         return result
 
     @mcp.tool()
-    def browser_agent_inspect(url: str, headless: bool = True, wait_time: int = 5,
+    async def browser_agent_inspect(ctx: Context, url: str, headless: bool = True, wait_time: int = 5,
                              action: str = "navigate", proxy_port: int = None, active_tests: bool = False) -> Dict[str, Any]:
         """
         AI-powered browser agent for comprehensive web application inspection and security analysis.
@@ -5272,7 +5282,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"{IntelliReconColors.CRIMSON}🌐 Starting Browser Agent {action}: {url}{IntelliReconColors.RESET}")
-        result = intellirecon_client.safe_post("api/tools/browser-agent", data_payload)
+        result = await _run_with_progress(ctx, "api/tools/browser-agent", data_payload)
 
         if result.get("success"):
             logger.info(f"{IntelliReconColors.SUCCESS}✅ Browser Agent {action} completed for {url}{IntelliReconColors.RESET}")
@@ -5294,26 +5304,26 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
 
     # ---------------- Additional HTTP Framework Tools (sync with server) ----------------
     @mcp.tool()
-    def http_set_rules(rules: list) -> Dict[str, Any]:
+    async def http_set_rules(ctx: Context, rules: list) -> Dict[str, Any]:
         """Set match/replace rules used to rewrite parts of URL/query/headers/body before sending.
         Rule format: {'where':'url|query|headers|body','pattern':'regex','replacement':'string'}"""
         payload = {"action": "set_rules", "rules": rules}
-        return intellirecon_client.safe_post("api/tools/http-framework", payload)
+        return await _run_with_progress(ctx, "api/tools/http-framework", payload)
 
     @mcp.tool()
-    def http_set_scope(host: str, include_subdomains: bool = True) -> Dict[str, Any]:
+    async def http_set_scope(ctx: Context, host: str, include_subdomains: bool = True) -> Dict[str, Any]:
         """Define in-scope host (and optionally subdomains) so out-of-scope requests are skipped."""
         payload = {"action": "set_scope", "host": host, "include_subdomains": include_subdomains}
-        return intellirecon_client.safe_post("api/tools/http-framework", payload)
+        return await _run_with_progress(ctx, "api/tools/http-framework", payload)
 
     @mcp.tool()
-    def http_repeater(request_spec: dict) -> Dict[str, Any]:
+    async def http_repeater(ctx: Context, request_spec: dict) -> Dict[str, Any]:
         """Send a crafted request (Burp Repeater equivalent). request_spec keys: url, method, headers, cookies, data."""
         payload = {"action": "repeater", "request": request_spec}
-        return intellirecon_client.safe_post("api/tools/http-framework", payload)
+        return await _run_with_progress(ctx, "api/tools/http-framework", payload)
 
     @mcp.tool()
-    def http_intruder(url: str, method: str = "GET", location: str = "query", params: list = None,
+    async def http_intruder(ctx: Context, url: str, method: str = "GET", location: str = "query", params: list = None,
                       payloads: list = None, base_data: dict = None, max_requests: int = 100) -> Dict[str, Any]:
         """Simple Intruder (sniper) fuzzing. Iterates payloads over each param individually.
         location: query|body|headers|cookie."""
@@ -5327,10 +5337,10 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
             "base_data": base_data or {},
             "max_requests": max_requests
         }
-        return intellirecon_client.safe_post("api/tools/http-framework", payload)
+        return await _run_with_progress(ctx, "api/tools/http-framework", payload)
 
     @mcp.tool()
-    def burpsuite_alternative_scan(target: str, scan_type: str = "comprehensive",
+    async def burpsuite_alternative_scan(ctx: Context, target: str, scan_type: str = "comprehensive",
                                   headless: bool = True, max_depth: int = 3,
                                   max_pages: int = 50) -> Dict[str, Any]:
         """
@@ -5355,7 +5365,7 @@ def setup_mcp_server(intellirecon_client: IntelliReconClient) -> FastMCP:
         }
 
         logger.info(f"{IntelliReconColors.BLOOD_RED}🔥 Starting Burp Suite Alternative {scan_type} scan: {target}{IntelliReconColors.RESET}")
-        result = intellirecon_client.safe_post("api/tools/burpsuite-alternative", data_payload)
+        result = await _run_with_progress(ctx, "api/tools/burpsuite-alternative", data_payload)
 
         if result.get("success"):
             logger.info(f"{IntelliReconColors.SUCCESS}✅ Burp Suite Alternative scan completed for {target}{IntelliReconColors.RESET}")

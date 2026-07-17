@@ -24,6 +24,13 @@ export interface ToolEvent {
   output?: string;
   startedAt: number;
   endedAt?: number;
+  // From MCP progress notifications (see _run_with_progress in
+  // engine/intellirecon_mcp.py) — a heartbeat at minimum ("still running
+  // (Ns elapsed)"), real percentage/ETA when the engine's process dashboard
+  // has a match. `progress`/`total` mirror the MCP spec's fields directly.
+  progress?: number;
+  progressTotal?: number;
+  progressMessage?: string;
 }
 
 export interface Finding {
@@ -63,6 +70,7 @@ export type AgentServerMsg =
   | { type: "assistant_done" }
   | { type: "tool_call"; id: string; name: string; server: string; input: unknown }
   | { type: "tool_result"; id: string; name: string; ok: boolean; output: string }
+  | { type: "tool_progress"; id: string; name: string; progress?: number; total?: number; message?: string }
   | { type: "finding"; finding: Finding }
   | { type: "error"; message: string };
 

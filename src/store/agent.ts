@@ -176,6 +176,15 @@ export const useAgent = create<AgentStore>((set, get) => ({
             ),
           });
           break;
+        case "tool_progress":
+          set({
+            toolEvents: get().toolEvents.map((t) =>
+              t.id === msg.id
+                ? { ...t, progress: msg.progress, progressTotal: msg.total, progressMessage: msg.message }
+                : t,
+            ),
+          });
+          break;
         case "finding": {
           // Server already persisted this (with a stable id/at) before sending it.
           set({ findings: [msg.finding, ...get().findings].slice(0, 500) });
