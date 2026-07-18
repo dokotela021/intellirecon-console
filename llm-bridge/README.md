@@ -29,7 +29,7 @@ Groq also hosts reasoning models (`openai/gpt-oss-*`, `qwen/qwen3*`) that emit `
 [('messages.1' : property 'thinking_blocks' is unsupported)]
 ```
 
-`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` don't do extended reasoning, so they never emit that block and the incompatibility never triggers. Confirmed by testing both the failing and working case directly — see `test_bridge_tools.mjs`.
+`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` don't do extended reasoning, so they never emit that block on their own turn — but that alone isn't enough. **A reasoning-capable OpenRouter fallback (e.g. `nemotron-3-ultra`, in `fallback-2`) can still emit one**, and once it does, `server.mjs` stores it permanently in `session.messages`. Groq's API rejects *any* assistant message containing `thinking_blocks` anywhere in history, not just the latest turn — so a single reasoning-model fallback mid-conversation silently breaks every later Groq call in that session, even ones targeting `llama-3.1-8b-instant`. Fixed by stripping `thinking`/`redacted_thinking` blocks in `server.mjs` before they're stored for replay, so it no longer matters which backend produced them. Confirmed by testing both the failing and working case directly — see `test_bridge_tools.mjs`.
 
 ## Setup
 

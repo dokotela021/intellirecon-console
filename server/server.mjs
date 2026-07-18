@@ -1019,7 +1019,16 @@ async function runAgentTurn(ws, session, userText) {
       break;
     }
     send(ws, { type: "assistant_done" });
-    session.messages.push({ role: "assistant", content: final.content });
+    // Strip thinking/redacted_thinking blocks before storing for replay. No
+    // caller here ever requests extended thinking (no `thinking` param
+    // above) — a block only appears when a reasoning-capable fallback model
+    // (e.g. OpenRouter's nemotron-3-ultra) emits one unprompted. Once stored,
+    // it stays in session.messages for the rest of the conversation and
+    // Groq's API rejects ANY assistant message containing thinking_blocks
+    // anywhere in history, not just the latest turn — so one reasoning-model
+    // fallback permanently breaks every later Groq call in that session.
+    const storedContent = final.content.filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking");
+    session.messages.push({ role: "assistant", content: storedContent });
 
     if (session.aborted) break;
 
